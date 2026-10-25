@@ -1,0 +1,22 @@
+{
+  "name": "speeddrop-discovery-server",
+  "version": "1.0.0",
+  "description": "Zero-configuration Public Discovery Server for SpeedDrop",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "speeddrop",
+    "discovery",
+    "matchmaking",
+    "p2p"
+  ],
+  "author": "SpeedDrop Team",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}

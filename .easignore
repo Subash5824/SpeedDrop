@@ -1,0 +1,17 @@
+node_modules/
+.expo/
+android/.gradle/
+android/app/build/
+android/build/
+ios/build/
+.git/
+*.apk
+*.mp4
+*.zip
+backend/
+web-receiver/
+**/node_modules/
+**/backend/
+**/.expo/
+**/build/
+**/.gradle/

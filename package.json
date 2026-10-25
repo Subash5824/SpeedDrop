@@ -1,0 +1,12 @@
+{
+  "name": "speeddrop",
+  "version": "1.0.0",
+  "scripts": {
+    "discovery": "node discovery-server/server.js",
+    "backend:dev": "npm --prefix mobile-app/backend run dev",
+    "mobile:start": "npm --prefix mobile-app run start"
+  },
+  "dependencies": {
+    "playwright": "^1.64.0"
+  }
+}
