@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { getDiscoveryServerUrl, TUNNEL_HEADERS } from '../utils/host';
+import { getDiscoveryServerUrl, TUNNEL_HEADERS, safeFetch } from '../utils/host';
 
 export interface DiscoveredDevice {
   id: string;
@@ -19,17 +19,16 @@ export const useDiscovery = (enabled: boolean = true) => {
   const scanForDevices = useCallback(async () => {
     try {
       const discoveryUrl = getDiscoveryServerUrl();
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 4000);
-
-      const res = await fetch(`${discoveryUrl}/api/list`, {
-        headers: {
-          Accept: 'application/json',
-          ...TUNNEL_HEADERS,
+      const res = await safeFetch(
+        `${discoveryUrl}/api/list`,
+        {
+          headers: {
+            Accept: 'application/json',
+            ...TUNNEL_HEADERS,
+          },
         },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+        3000
+      );
 
       if (res.ok) {
         const data = await res.json();

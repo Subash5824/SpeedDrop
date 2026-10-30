@@ -148,4 +148,79 @@ if (typeof globalThis !== 'undefined') {
   }
 }
 
+/**
+ * ============================================================================
+ * GLOBAL UNHANDLED PROMISE REJECTION & NETWORK ERROR SHIELD
+ * ============================================================================
+ * Prevents network failures, DNS resolution errors, timeout errors, or aborted
+ * fetches from bubbling up as unhandled fatal exceptions that crash the Android app
+ * with "SpeedDrop keeps stopping".
+ */
+
+// 1. Intercept unhandled rejections via React Native's internal promise rejection tracker
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const rejectionTracking = require('promise/setimmediate/rejection-tracking');
+  if (rejectionTracking && typeof rejectionTracking.enable === 'function') {
+    rejectionTracking.enable({
+      allRejections: true,
+      onUnhandled: (id: any, rejection: any) => {
+        const msg = String(rejection?.message || rejection || '');
+        console.warn(`[SafePromiseShield] Intercepted unhandled rejection (${id}):`, msg);
+      },
+      onHandled: () => {},
+    });
+  }
+} catch (_) {
+  // Fall back silently if module isn't directly exposed
+}
+
+// 2. Install global onunhandledrejection listener on global and globalThis
+const handleUnhandledRejection = (event: any) => {
+  const reason = event?.reason;
+  const msg = String(reason?.message || reason || '');
+  console.warn('[GlobalPromiseRejection] Suppressed:', msg);
+  if (event && typeof event.preventDefault === 'function') {
+    event.preventDefault();
+  }
+};
+
+if (typeof (global as any).onunhandledrejection === 'undefined') {
+  (global as any).onunhandledrejection = handleUnhandledRejection;
+}
+if (typeof globalThis !== 'undefined' && typeof (globalThis as any).onunhandledrejection === 'undefined') {
+  (globalThis as any).onunhandledrejection = handleUnhandledRejection;
+}
+
+// 3. React Native ErrorUtils Global Handler: prevent network errors from killing the native process
+if ((global as any).ErrorUtils && typeof (global as any).ErrorUtils.getGlobalHandler === 'function') {
+  const originalGlobalHandler = (global as any).ErrorUtils.getGlobalHandler();
+  (global as any).ErrorUtils.setGlobalHandler((error: any, isFatal?: boolean) => {
+    const errorStr = String(error?.message || error?.stack || error || '').toLowerCase();
+    const isNetworkOrAbort =
+      errorStr.includes('network request failed') ||
+      errorStr.includes('aborted') ||
+      errorStr.includes('aborterror') ||
+      errorStr.includes('timeout') ||
+      errorStr.includes('econnrefused') ||
+      errorStr.includes('enotfound') ||
+      errorStr.includes('network error') ||
+      errorStr.includes('failed to fetch') ||
+      errorStr.includes('connection timed out') ||
+      errorStr.includes('socket hang up') ||
+      errorStr.includes('could not reach') ||
+      errorStr.includes('request timed out');
+
+    if (isNetworkOrAbort) {
+      console.warn('[GlobalErrorHandler] Suppressed non-fatal network/timeout error:', error?.message || error);
+      return; // Do NOT crash Android app
+    }
+
+    if (typeof originalGlobalHandler === 'function') {
+      originalGlobalHandler(error, isFatal);
+    }
+  });
+}
+
+
 export {};

@@ -12,7 +12,7 @@ import {
 import { Ionicons as Icon } from '@expo/vector-icons';
 import { Colors } from '@/constants/colors';
 import { validateSharerId } from '@/utils/generators/sharerId';
-import { getApiUrl, TUNNEL_HEADERS } from '@/utils/host';
+import { getApiUrl, TUNNEL_HEADERS, safeFetch } from '@/utils/host';
 import { connectionScreenStyles as styles } from '@/styles/screens/ConnectionScreen.styles';
 
 interface ConnectionScreenProps {
@@ -54,9 +54,14 @@ export default function ConnectionScreen({ navigation, route }: ConnectionScreen
     try {
       const targetServer = ipAddress.includes(':') || ipAddress.startsWith('http') ? ipAddress : `${ipAddress}:${port}`;
       const url = getApiUrl('/api/sharer/discover', targetServer);
-      const response = await fetch(url, {
-        headers: TUNNEL_HEADERS,
-      });
+      const response = await safeFetch(
+        url,
+        { headers: TUNNEL_HEADERS },
+        4000
+      );
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status}`);
+      }
       const data = await response.json();
       
       navigation.navigate('Receive', {

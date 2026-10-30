@@ -300,32 +300,86 @@ export function getDiscoveryServerUrl(): string {
 }
 
 /**
+ * Universal safe fetch wrapper that enforces strict timeout aborts,
+ * guarantees clearTimeout in a finally block (preventing orphan timer leaks),
+ * and catches network errors cleanly without throwing unhandled exceptions.
+ */
+export async function safeFetch(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs: number = 3500
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      controller.abort();
+    } catch (_) {}
+  }, timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return res;
+  } catch (err: any) {
+    if (timedOut || err?.name === 'AbortError') {
+      const tErr = new Error(`Network request to ${url} timed out after ${timeoutMs}ms`);
+      (tErr as any).isTimeout = true;
+      throw tErr;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Checks server health with a tight timeout, returning a boolean.
+ * Never throws an error.
+ */
+export async function checkServerHealth(
+  host?: string,
+  timeoutMs: number = 3000
+): Promise<boolean> {
+  try {
+    const base = getServerUrl(host);
+    const res = await safeFetch(`${base}/health`, { headers: TUNNEL_HEADERS }, timeoutMs);
+    return res.ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
  * Automatically queries the Cloud Discovery Server to fetch the freshest active backend address.
  * If sharerId is passed, queries /api/resolve/:sharerId.
  * If omitted, queries /api/active to get the most recent active backend.
  *
  * Automatically updates and persists the active server URL into cache and AsyncStorage.
+ * Guaranteed safe: never throws unhandled errors.
  */
 export async function fetchActiveServerFromDiscovery(
   sharerId?: string
 ): Promise<DiscoveredServerInfo | null> {
-  const discoveryBase = getDiscoveryServerUrl();
-  const endpoint = sharerId && sharerId.trim()
-    ? `${discoveryBase}/api/resolve/${encodeURIComponent(sharerId.trim())}`
-    : `${discoveryBase}/api/active`;
-
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
+    const discoveryBase = getDiscoveryServerUrl();
+    const endpoint = sharerId && sharerId.trim()
+      ? `${discoveryBase}/api/resolve/${encodeURIComponent(sharerId.trim())}`
+      : `${discoveryBase}/api/active`;
 
-    const res = await fetch(endpoint, {
-      headers: {
-        'Accept': 'application/json',
-        ...TUNNEL_HEADERS,
+    const res = await safeFetch(
+      endpoint,
+      {
+        headers: {
+          Accept: 'application/json',
+          ...TUNNEL_HEADERS,
+        },
       },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+      3000
+    );
 
     if (!res.ok) {
       return null;
@@ -336,15 +390,15 @@ export async function fetchActiveServerFromDiscovery(
       return null;
     }
 
-    // Determine the best candidate URL: prioritize 24/7 cloud URL, activeUrl, serverUrl
     const candidateUrl =
       data.activeUrl ||
       data.serverUrl ||
       data.tunnelUrl ||
       (data.localIp ? `http://${data.localIp}:${data.port || DEFAULT_PORTS.BACKEND}` : null);
+
     if (candidateUrl) {
       const normalized = normalizeServerUrl(candidateUrl);
-      await setServerUrl(normalized);
+      await setServerUrl(normalized).catch(() => {});
       console.log(`[Auto-Discovery] Resolved active server: ${normalized}`);
       return {
         activeUrl: normalized,
@@ -357,7 +411,7 @@ export async function fetchActiveServerFromDiscovery(
       };
     }
   } catch (err: any) {
-    console.warn(`[Auto-Discovery] Query failed:`, err.message || err);
+    console.warn(`[Auto-Discovery] Query failed safely:`, err?.message || err);
   }
 
   return null;
@@ -366,6 +420,7 @@ export async function fetchActiveServerFromDiscovery(
 /**
  * Directly queries the PC backend's /api/network-info endpoint to obtain
  * active network interface details.
+ * Guaranteed safe: never throws unhandled errors.
  */
 export async function fetchNetworkInfo(host?: string): Promise<{
   ip: string;
@@ -376,12 +431,7 @@ export async function fetchNetworkInfo(host?: string): Promise<{
 } | null> {
   try {
     const base = getServerUrl(host);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
-    const res = await fetch(`${base}/api/network-info`, {
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+    const res = await safeFetch(`${base}/api/network-info`, {}, 3000);
     if (res.ok) {
       return await res.json();
     }
@@ -391,46 +441,48 @@ export async function fetchNetworkInfo(host?: string): Promise<{
 
 /**
  * Wakes up the Render / cloud backend by polling /health.
- * Handles Render free-tier cold starts (~20-40s) with progressive retry status updates.
+ * Optimized for fast responsiveness: uses a tight 3.5s timeout per attempt,
+ * limiting attempts to 2 (max ~7-8 seconds total wait), and falls back gracefully.
+ * Never throws unhandled promise errors.
  */
 export async function wakeUpServer(
   serverUrl?: string,
   onStatusUpdate?: (statusMessage: string) => void,
-  maxAttempts: number = 8
+  maxAttempts: number = 2
 ): Promise<boolean> {
-  const base = getServerUrl(serverUrl);
-  const healthUrl = `${base}/health`;
+  try {
+    const base = getServerUrl(serverUrl);
+    const healthUrl = `${base}/health`;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      if (onStatusUpdate) {
-        if (attempt === 1) {
-          onStatusUpdate('Connecting to cloud server...');
-        } else {
-          onStatusUpdate(`Waking up cloud server (attempt ${attempt}/${maxAttempts})...`);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        if (onStatusUpdate) {
+          if (attempt === 1) {
+            onStatusUpdate('Connecting to cloud server...');
+          } else {
+            onStatusUpdate(`Waking up cloud server (attempt ${attempt}/${maxAttempts})...`);
+          }
         }
+
+        const res = await safeFetch(
+          healthUrl,
+          { headers: TUNNEL_HEADERS },
+          3500
+        );
+
+        if (res.ok) {
+          return true;
+        }
+      } catch (err: any) {
+        console.warn(`[wakeUpServer] Attempt ${attempt} did not succeed:`, err?.message || err);
       }
 
-      const controller = new AbortController();
-      const timeoutMs = attempt === 1 ? 5000 : 10000;
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-      const res = await fetch(healthUrl, {
-        headers: TUNNEL_HEADERS,
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-
-      if (res.ok) {
-        return true;
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 1200));
       }
-    } catch (err: any) {
-      // Continue polling until maxAttempts
     }
-
-    if (attempt < maxAttempts) {
-      await new Promise((r) => setTimeout(r, 2000));
-    }
+  } catch (outerErr: any) {
+    console.warn('[wakeUpServer] Handled cleanly:', outerErr?.message || outerErr);
   }
 
   return false;

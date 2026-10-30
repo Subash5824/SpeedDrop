@@ -37,8 +37,11 @@ import {
   normalizeServerUrl,
   fetchActiveServerFromDiscovery,
   wakeUpServer,
+  safeFetch,
+  checkServerHealth,
   TUNNEL_HEADERS,
 } from '@/utils/host';
+import { useNetworkStatus } from '@/context/NetworkContext';
 import { FileInfo, Device } from '@/types/sharer';
 import { senderScreenStyles as styles } from '@/styles/screens/SenderScreen.styles';
 import { modalStyles } from '@/styles/shared/modals.styles';
@@ -46,6 +49,7 @@ import { modalStyles } from '@/styles/shared/modals.styles';
 import { Ionicons as Icon } from '@expo/vector-icons';
 
 export default function SenderScreen() {
+  const { isOffline, isConnected, recheckConnection } = useNetworkStatus();
   const [sharerId, setSharerId] = useState('');
   const [sharerName, setSharerName] = useState('Mobile User');
   const [isActive, setIsActive] = useState(false);
@@ -94,10 +98,10 @@ export default function SenderScreen() {
         await AsyncStorage.setItem(Config.storageKeys.sharerId, newId);
       }
 
-      // Proactively ping health endpoint in background to wake up sleeping Render instances
-      fetch(getApiUrl('/health', activeHost), { headers: TUNNEL_HEADERS }).catch(() => {});
+      // Proactively ping health endpoint with safe 2.5s timeout (never throws)
+      checkServerHealth(activeHost, 2500).catch(() => {});
     } catch (error) {
-      console.error('Failed to load sharer info:', error);
+      console.warn('Failed to load sharer info:', error);
     }
   };
 
@@ -106,6 +110,15 @@ export default function SenderScreen() {
     if (!sharerName.trim()) {
       setSharerName('Mobile User');
       await AsyncStorage.setItem(Config.storageKeys.sharerName, 'Mobile User');
+    }
+
+    // Fast check: if device has no connection at all
+    if (!isConnected) {
+      Alert.alert(
+        'Offline Mode',
+        'Your device has no active network connection. Please connect to Wi-Fi or Mobile Data to share files via the cloud server, or set up a Mobile Hotspot for direct local sharing.'
+      );
+      return null;
     }
 
     setLoading(true);
@@ -119,32 +132,36 @@ export default function SenderScreen() {
     try {
       let response: Response | null = null;
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 7000);
-        response = await fetch(getApiUrl('/api/sharer/create', host), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...TUNNEL_HEADERS,
+        response = await safeFetch(
+          getApiUrl('/api/sharer/create', host),
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...TUNNEL_HEADERS,
+            },
+            body: JSON.stringify({ name: effectiveName }),
           },
-          body: JSON.stringify({ name: effectiveName }),
-          signal: controller.signal,
-        });
-        clearTimeout(timer);
+          3500
+        );
       } catch (directErr) {
         // First try failed (likely Render free tier waking up from cold sleep)
-        console.log('[Sender] Direct request failed, attempting server wake-up...');
-        const awake = await wakeUpServer(host, undefined, 5);
+        console.log('[Sender] Direct request failed, attempting quick server wake-up...');
+        const awake = await wakeUpServer(host, undefined, 2);
         if (awake) {
           try {
-            response = await fetch(getApiUrl('/api/sharer/create', host), {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                ...TUNNEL_HEADERS,
+            response = await safeFetch(
+              getApiUrl('/api/sharer/create', host),
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...TUNNEL_HEADERS,
+                },
+                body: JSON.stringify({ name: effectiveName }),
               },
-              body: JSON.stringify({ name: effectiveName }),
-            });
+              3500
+            );
           } catch (_) {}
         }
 
@@ -155,14 +172,20 @@ export default function SenderScreen() {
             host = normalizeServerUrl(discovered.activeUrl);
             setTargetServerIp(host);
             persistServerIp(host).catch(() => {});
-            response = await fetch(getApiUrl('/api/sharer/create', host), {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                ...TUNNEL_HEADERS,
-              },
-              body: JSON.stringify({ name: effectiveName }),
-            });
+            try {
+              response = await safeFetch(
+                getApiUrl('/api/sharer/create', host),
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    ...TUNNEL_HEADERS,
+                  },
+                  body: JSON.stringify({ name: effectiveName }),
+                },
+                3500
+              );
+            } catch (_) {}
           }
         }
       }
@@ -182,6 +205,13 @@ export default function SenderScreen() {
       }
       
       const newSocket = io(getSocketUrl(host), getSocketOptions(host));
+      newSocket.on('connect_error', (err: any) => {
+        console.warn('[Sender] Socket connection error:', err?.message || err);
+      });
+      newSocket.on('error', (err: any) => {
+        console.warn('[Sender] Socket general error:', err);
+      });
+
       newSocket.emit('register-sharer', {
         sessionId: data.sessionId,
         sharerId: data.sharerId,
@@ -199,7 +229,8 @@ export default function SenderScreen() {
       setSocket(newSocket);
       setIsActive(true);
       return data.sessionId;
-    } catch (error) {
+    } catch (error: any) {
+      console.warn('[Sender] startSharing failed safely:', error?.message || error);
       const isCloudServer = host.startsWith('https://') || host.includes('onrender.com');
       const displayHost = getDisplayServer(host);
       Alert.alert(
@@ -297,19 +328,23 @@ export default function SenderScreen() {
       const host = (targetServerIp && targetServerIp.trim()) || getServerIp();
 
       // Initialize upload record on backend
-      const initRes = await fetch(getApiUrl(`/api/upload/${currentSession}/init`, host), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...TUNNEL_HEADERS,
+      const initRes = await safeFetch(
+        getApiUrl(`/api/upload/${currentSession}/init`, host),
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...TUNNEL_HEADERS,
+          },
+          body: JSON.stringify({
+            fileId,
+            name: file.name,
+            size: fileSize,
+            type: fileMimeType,
+          }),
         },
-        body: JSON.stringify({
-          fileId,
-          name: file.name,
-          size: fileSize,
-          type: fileMimeType,
-        }),
-      });
+        6000
+      );
 
       if (!initRes.ok) {
         throw new Error(`Init failed with status ${initRes.status}`);
@@ -363,7 +398,7 @@ export default function SenderScreen() {
           while (!chunkSent && retryCount < 3) {
             try {
               retryCount++;
-              const chunkRes = await fetch(
+              const chunkRes = await safeFetch(
                 getApiUrl(`/api/upload/${currentSession}/${fileId}?chunk=${i}&totalChunks=${totalChunks}`, host),
                 {
                   method: 'POST',
@@ -373,7 +408,8 @@ export default function SenderScreen() {
                     ...TUNNEL_HEADERS,
                   },
                   body: JSON.stringify({ chunk: chunkBase64 }),
-                }
+                },
+                8000
               );
 
               if (!chunkRes.ok) {

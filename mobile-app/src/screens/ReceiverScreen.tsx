@@ -30,6 +30,7 @@ import {
   getApiUrl,
   normalizeServerUrl,
   fetchActiveServerFromDiscovery,
+  safeFetch,
   TUNNEL_HEADERS,
 } from '@/utils/host';
 
@@ -68,8 +69,8 @@ export default function ReceiverScreen() {
   };
 
   useEffect(() => {
-    requestPermission();
-    getServerUrlAsync().then(url => setServerIp(url));
+    requestPermission().catch(() => {});
+    getServerUrlAsync().then(url => setServerIp(url)).catch(() => {});
   }, []);
 
   const handleBarCodeScanned = async ({ data }: { data: string }) => {
@@ -120,9 +121,11 @@ export default function ReceiverScreen() {
       if (sharerId) {
         let discFound = false;
         try {
-          const res = await fetch(getApiUrl(`/api/sharer/discover?sid=${encodeURIComponent(sharerId)}`, targetServer), {
-            headers: TUNNEL_HEADERS,
-          });
+          const res = await safeFetch(
+            getApiUrl(`/api/sharer/discover?sid=${encodeURIComponent(sharerId)}`, targetServer),
+            { headers: TUNNEL_HEADERS },
+            3500
+          );
           if (res.ok) {
             const disc = await res.json();
             if (disc.sessionId) {
@@ -136,25 +139,31 @@ export default function ReceiverScreen() {
         const cloudDisc = await fetchActiveServerFromDiscovery(sharerId);
         if (cloudDisc && cloudDisc.activeUrl) {
           targetServer = cloudDisc.activeUrl;
-          const retryRes = await fetch(getApiUrl(`/api/sharer/discover?sid=${encodeURIComponent(sharerId)}`, targetServer), {
-            headers: TUNNEL_HEADERS,
-          });
-          if (retryRes.ok) {
-            const disc = await retryRes.json();
-            if (disc.sessionId) {
-              await connectToSharer(targetServer, disc.sessionId);
-              return;
+          try {
+            const retryRes = await safeFetch(
+              getApiUrl(`/api/sharer/discover?sid=${encodeURIComponent(sharerId)}`, targetServer),
+              { headers: TUNNEL_HEADERS },
+              3500
+            );
+            if (retryRes.ok) {
+              const disc = await retryRes.json();
+              if (disc.sessionId) {
+                await connectToSharer(targetServer, disc.sessionId);
+                return;
+              }
             }
-          }
+          } catch (_) {}
         }
       }
 
       // If scanning root link (e.g. https://... or http://...), query /api/sharer/active
       let activeDataSession: string | null = null;
       try {
-        const activeRes = await fetch(getApiUrl('/api/sharer/active', targetServer), {
-          headers: TUNNEL_HEADERS,
-        });
+        const activeRes = await safeFetch(
+          getApiUrl('/api/sharer/active', targetServer),
+          { headers: TUNNEL_HEADERS },
+          3500
+        );
         if (activeRes.ok) {
           const activeData = await activeRes.json();
           if (activeData.sessionId) {
@@ -172,21 +181,25 @@ export default function ReceiverScreen() {
       const latestDisc = await fetchActiveServerFromDiscovery();
       if (latestDisc && latestDisc.activeUrl) {
         targetServer = latestDisc.activeUrl;
-        const actRes = await fetch(getApiUrl('/api/sharer/active', targetServer), {
-          headers: TUNNEL_HEADERS,
-        });
-        if (actRes.ok) {
-          const actData = await actRes.json();
-          if (actData.sessionId) {
-            await connectToSharer(targetServer, actData.sessionId);
-            return;
+        try {
+          const actRes = await safeFetch(
+            getApiUrl('/api/sharer/active', targetServer),
+            { headers: TUNNEL_HEADERS },
+            3500
+          );
+          if (actRes.ok) {
+            const actData = await actRes.json();
+            if (actData.sessionId) {
+              await connectToSharer(targetServer, actData.sessionId);
+              return;
+            }
           }
-        }
+        } catch (_) {}
       }
 
       throw new Error(`No active sharer found at ${targetServer}`);
     } catch (error: any) {
-      console.error('QR scan error:', error);
+      console.warn('QR scan error handled:', error?.message || error);
       Alert.alert('Scan Failed', error?.message || 'Could not connect to sharer from QR code.');
     } finally {
       setLoading(false);
@@ -199,12 +212,16 @@ export default function ReceiverScreen() {
       const targetBase = getServerUrl(targetServerInput);
       console.log(`Connecting to ${targetBase} session ${session}`);
       
-      const response = await fetch(getApiUrl(`/api/sharer/${session}`, targetBase), {
-        headers: {
-          'Cache-Control': 'no-cache',
-          ...TUNNEL_HEADERS,
-        }
-      });
+      const response = await safeFetch(
+        getApiUrl(`/api/sharer/${session}`, targetBase),
+        {
+          headers: {
+            'Cache-Control': 'no-cache',
+            ...TUNNEL_HEADERS,
+          },
+        },
+        5000
+      );
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         throw new Error(errorData.error || `Server responded with status ${response.status}`);
@@ -221,8 +238,15 @@ export default function ReceiverScreen() {
         socket.disconnect();
       }
 
-      // Setup WebSocket with tunnel-safe options
+      // Setup WebSocket with tunnel-safe options & safe error handlers
       const newSocket = io(getSocketUrl(targetBase), getSocketOptions(targetBase));
+      newSocket.on('connect_error', (err: any) => {
+        console.warn('[Receiver] Socket connect error:', err?.message || err);
+      });
+      newSocket.on('error', (err: any) => {
+        console.warn('[Receiver] Socket general error:', err);
+      });
+
       newSocket.emit('register-receiver', {
         sessionId: session,
         deviceName: 'Mobile Device',
@@ -239,8 +263,8 @@ export default function ReceiverScreen() {
       setSocket(newSocket);
       Alert.alert('Connected', `Connected to ${data.sharerName}`);
     } catch (error: any) {
-      console.error('Connection error:', error);
-      Alert.alert('Error', error.message || 'Failed to connect to sharer. Make sure the sender is online.');
+      console.warn('Connection error handled:', error?.message || error);
+      Alert.alert('Error', error?.message || 'Failed to connect to sharer. Make sure the sender is online.');
     } finally {
       setLoading(false);
     }
@@ -301,9 +325,11 @@ export default function ReceiverScreen() {
       if (targetSid) {
         let discFound = false;
         try {
-          const discRes = await fetch(getApiUrl(`/api/sharer/discover?sid=${encodeURIComponent(targetSid)}`, targetServer), {
-            headers: TUNNEL_HEADERS,
-          });
+          const discRes = await safeFetch(
+            getApiUrl(`/api/sharer/discover?sid=${encodeURIComponent(targetSid)}`, targetServer),
+            { headers: TUNNEL_HEADERS },
+            3500
+          );
           if (discRes.ok) {
             const disc = await discRes.json();
             if (disc.sessionId) {
@@ -320,9 +346,11 @@ export default function ReceiverScreen() {
         if (cloudDisc && cloudDisc.activeUrl) {
           targetServer = cloudDisc.activeUrl;
           try {
-            const retryRes = await fetch(getApiUrl(`/api/sharer/discover?sid=${encodeURIComponent(targetSid)}`, targetServer), {
-              headers: TUNNEL_HEADERS,
-            });
+            const retryRes = await safeFetch(
+              getApiUrl(`/api/sharer/discover?sid=${encodeURIComponent(targetSid)}`, targetServer),
+              { headers: TUNNEL_HEADERS },
+              3500
+            );
             if (retryRes.ok) {
               const disc = await retryRes.json();
               if (disc.sessionId) {
@@ -337,9 +365,11 @@ export default function ReceiverScreen() {
 
       // Try active sharer on local server
       try {
-        const actRes = await fetch(getApiUrl('/api/sharer/active', targetServer), {
-          headers: TUNNEL_HEADERS,
-        });
+        const actRes = await safeFetch(
+          getApiUrl('/api/sharer/active', targetServer),
+          { headers: TUNNEL_HEADERS },
+          3500
+        );
         if (actRes.ok) {
           const actData = await actRes.json();
           if (actData.sessionId) {
@@ -355,9 +385,11 @@ export default function ReceiverScreen() {
       if (latestDisc && latestDisc.activeUrl) {
         targetServer = latestDisc.activeUrl;
         try {
-          const actRes = await fetch(getApiUrl('/api/sharer/active', targetServer), {
-            headers: TUNNEL_HEADERS,
-          });
+          const actRes = await safeFetch(
+            getApiUrl('/api/sharer/active', targetServer),
+            { headers: TUNNEL_HEADERS },
+            3500
+          );
           if (actRes.ok) {
             const actData = await actRes.json();
             if (actData.sessionId) {
@@ -371,6 +403,7 @@ export default function ReceiverScreen() {
 
       throw new Error(`Sharer "${targetSid || input}" not found. Please ensure the sender is running.`);
     } catch (error: any) {
+      console.warn('Manual connect error handled:', error?.message || error);
       Alert.alert('Connection Failed', error?.message || 'Could not find sharer.');
     } finally {
       setLoading(false);
