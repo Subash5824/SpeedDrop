@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: speeddrop
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: PUBLIC_URL
+        value: https://speeddrop.onrender.com
+      - key: DISCOVERY_SERVER_URL
+        value: https://speeddrop.onrender.com

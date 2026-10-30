@@ -1,12 +1,16 @@
 services:
   - type: web
-    name: speeddrop-discovery
+    name: speeddrop
     runtime: node
     plan: free
-    buildCommand: npm install
-    startCommand: node server.js
+    buildCommand: cd .. && npm run build
+    startCommand: cd .. && npm start
     envVars:
       - key: PORT
         value: 10000
-      - key: SESSION_TTL_MS
-        value: 3600000
+      - key: NODE_ENV
+        value: production
+      - key: PUBLIC_URL
+        value: https://speeddrop.onrender.com
+      - key: DISCOVERY_SERVER_URL
+        value: https://speeddrop.onrender.com

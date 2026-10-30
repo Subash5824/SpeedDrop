@@ -4,7 +4,7 @@
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "expo start --lan -c",
-    "start:lan": "set REACT_NATIVE_PACKAGER_HOSTNAME=10.182.74.170&& expo start --lan -c",
+    "start:lan": "set REACT_NATIVE_PACKAGER_HOSTNAME=10.17.70.170&& expo start --lan -c",
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",

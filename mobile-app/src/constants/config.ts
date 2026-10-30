@@ -13,7 +13,7 @@ export const Config = {
   connectionTimeout: 10000,
   
   // Public Cloud Discovery Microservice
-  discoveryServerUrl: process.env.EXPO_PUBLIC_DISCOVERY_URL || 'https://speeddrop-discovery.onrender.com',
+  discoveryServerUrl: process.env.EXPO_PUBLIC_DISCOVERY_URL || 'https://speeddrop.onrender.com',
   
   // Sharer ID settings
   sharerIdPrefix: 'SD',
@@ -31,6 +31,6 @@ export const Config = {
     transferHistory: '@speeddrop/transfer_history',
     settings: '@speeddrop/settings',
   },
-  defaultServerUrl: process.env.EXPO_PUBLIC_BACKEND_URL || 'http://10.182.74.170:3000',
-  defaultServerIp: '10.182.74.170',
+  defaultServerUrl: process.env.EXPO_PUBLIC_BACKEND_URL || 'https://speeddrop.onrender.com',
+  defaultServerIp: 'https://speeddrop.onrender.com',
 };

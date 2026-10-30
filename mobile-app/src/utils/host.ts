@@ -1,9 +1,11 @@
 import { NativeModules } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Config } from '../constants/config';
-import { DEFAULT_PORTS, DEFAULT_IP, DEFAULT_DISCOVERY_URL } from '../constants/endpoints';
+import { DEFAULT_PORTS, DEFAULT_IP } from '../constants/endpoints';
 
-export const FALLBACK_IP = '10.182.74.170';
+export const DEFAULT_DISCOVERY_URL = 'https://speeddrop.onrender.com';
+
+export const FALLBACK_IP = 'https://speeddrop.onrender.com';
 
 /**
  * Universal headers required when communicating over public tunnels
@@ -16,8 +18,23 @@ export const TUNNEL_HEADERS: Record<string, string> = {
 };
 
 /**
+ * Helper to identify if a saved or entered host is an old private local IP
+ * (e.g. 10.x.x.x, 192.168.x.x, 172.16-31.x.x, 127.0.0.1, localhost).
+ */
+export function isLocalPrivateAddress(urlOrIp?: string | null): boolean {
+  if (!urlOrIp || !urlOrIp.trim()) return false;
+  const clean = urlOrIp.trim().replace(/^https?:\/\//i, '').replace(/:\d+$/, '');
+  return (
+    clean === 'localhost' ||
+    clean === '127.0.0.1' ||
+    clean.startsWith('10.') ||
+    clean.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(clean)
+  );
+}
+
+/**
  * Extracts the host IP from NativeModules.SourceCode.scriptURL (Metro bundler URL).
- * In Expo Go, this points to e.g. http://10.182.74.170:8081/index.bundle?...
  */
 export function detectMetroHost(): string | null {
   try {
@@ -38,18 +55,14 @@ export function detectMetroHost(): string | null {
 }
 
 /**
- * Normalizes any server input (HTTPS tunnel URL, IP, hostname, IP:port)
+ * Normalizes any server input (HTTPS cloud URL, IP, hostname, IP:port)
  * into a fully-qualified, reachable base URL without trailing slash.
  *
  * Examples:
- * - "https://pretty-berries-happen.loca.lt" -> "https://pretty-berries-happen.loca.lt"
- * - "https://speeddrop.trycloudflare.com/"  -> "https://speeddrop.trycloudflare.com"
- * - "speeddrop.trycloudflare.com"          -> "https://speeddrop.trycloudflare.com"
- * - "xyz.ngrok-free.app"                   -> "https://xyz.ngrok-free.app"
- * - "http://10.182.74.170:3000"            -> "http://10.182.74.170:3000"
- * - "10.182.74.170:3000"                   -> "http://10.182.74.170:3000"
- * - "10.182.74.170"                        -> "http://10.182.74.170:3000"
- * - "localhost"                            -> "http://localhost:3000"
+ * - "https://speeddrop.onrender.com/"    -> "https://speeddrop.onrender.com"
+ * - "speeddrop.onrender.com"            -> "https://speeddrop.onrender.com"
+ * - "https://speeddrop.onrender.com:3000"-> "https://speeddrop.onrender.com"
+ * - "http://192.168.1.5:3000"           -> "http://192.168.1.5:3000"
  */
 export function normalizeServerUrl(rawInput?: string | null): string {
   if (!rawInput || !rawInput.trim()) {
@@ -57,33 +70,40 @@ export function normalizeServerUrl(rawInput?: string | null): string {
     if (envUrl && envUrl.trim()) {
       return normalizeServerUrl(envUrl.trim());
     }
-    const metroHost = detectMetroHost();
-    const fallbackHost = metroHost || DEFAULT_IP || FALLBACK_IP;
-    return normalizeServerUrl(fallbackHost);
+    return 'https://speeddrop.onrender.com';
   }
 
   let inp = rawInput.trim().replace(/\/+$/, '');
 
-  // 1. Full protocol already provided
+  // 1. Identify if this is a public cloud hostname (Render, Cloudflare, Ngrok, Fly, etc.)
+  const tunnelPattern = /\.(trycloudflare\.com|loca\.lt|ngrok(-free)?\.(app|io)|run\.app|fly\.dev|herokuapp\.com|onrender\.com)/i;
+  const isTunnelDomain = tunnelPattern.test(inp) || (!/^(\d{1,3}\.){3}\d{1,3}/.test(inp.replace(/^https?:\/\//i, '')) && !inp.includes('localhost'));
+
+  if (isTunnelDomain) {
+    // Strip protocol first
+    let cleanDomain = inp.replace(/^https?:\/\//i, '');
+    // CRITICAL: Strip any custom port (:3000, :8080) from public cloud domains! Tunnels only listen on standard HTTPS (port 443).
+    cleanDomain = cleanDomain.replace(/:\d+$/, '');
+    // Always enforce HTTPS for public domains
+    return `https://${cleanDomain}`;
+  }
+
+  // 2. Full protocol already provided for LAN / local IPs
   if (/^https?:\/\//i.test(inp)) {
+    const withoutProto = inp.replace(/^https?:\/\//i, '');
+    // If it's an IP or localhost without a port, append DEFAULT_PORTS.BACKEND
+    if ((/^(\d{1,3}\.){3}\d{1,3}/.test(withoutProto) || withoutProto.startsWith('localhost')) && !/:\d+$/.test(withoutProto)) {
+      return `${inp}:${DEFAULT_PORTS.BACKEND}`;
+    }
     return inp;
   }
 
-  // 2. Localhost special handling
+  // 3. Localhost special handling
   if (inp === 'localhost' || inp.startsWith('localhost:')) {
     return inp.includes(':') ? `http://${inp}` : `http://${inp}:${DEFAULT_PORTS.BACKEND}`;
   }
 
-  // 3. Known tunnel domains or domain names without port -> default to HTTPS
-  const tunnelPattern = /\.(trycloudflare\.com|loca\.lt|ngrok(-free)?\.(app|io)|run\.app|fly\.dev|herokuapp\.com)/i;
-  if (
-    tunnelPattern.test(inp) ||
-    (!inp.includes(':') && /[a-zA-Z]/.test(inp) && !inp.startsWith('192.') && !inp.startsWith('10.'))
-  ) {
-    return `https://${inp}`;
-  }
-
-  // 4. IP or host with port already specified (e.g. 10.182.74.170:3000)
+  // 4. IP or host with port already specified (e.g. 192.168.1.5:3000)
   if (/:\d+$/.test(inp)) {
     return `http://${inp}`;
   }
@@ -92,22 +112,39 @@ export function normalizeServerUrl(rawInput?: string | null): string {
   return `http://${inp}:${DEFAULT_PORTS.BACKEND}`;
 }
 
-// In-memory cache of the active normalized server base URL
+// In-memory cache of the active normalized server base URL (defaulting strictly to 24/7 cloud server)
 let cachedServerUrl: string = normalizeServerUrl(
-  process.env.EXPO_PUBLIC_BACKEND_URL || detectMetroHost() || DEFAULT_IP || FALLBACK_IP
+  process.env.EXPO_PUBLIC_BACKEND_URL || 'https://speeddrop.onrender.com'
 );
 
-// Self-initialize from AsyncStorage in background
-AsyncStorage.getItem(Config.storageKeys.targetServerIp || '@speeddrop/target_server_ip')
+const TARGET_SERVER_KEY = Config.storageKeys.targetServerIp || '@speeddrop/target_server_ip';
+
+// Self-initialize from AsyncStorage in background & clean up any legacy stale local IPs
+AsyncStorage.getItem(TARGET_SERVER_KEY)
   .then((saved) => {
     if (saved && saved.trim()) {
-      cachedServerUrl = normalizeServerUrl(saved.trim());
+      const trimmed = saved.trim();
+      // If user had a stale local private IP saved (like 10.x.x.x:3000), migrate them permanently to cloud
+      if (isLocalPrivateAddress(trimmed)) {
+        cachedServerUrl = 'https://speeddrop.onrender.com';
+        AsyncStorage.setItem(TARGET_SERVER_KEY, cachedServerUrl).catch(() => {});
+        console.log('[host] Migrated stale local IP from AsyncStorage to https://speeddrop.onrender.com');
+      } else {
+        const normalized = normalizeServerUrl(trimmed);
+        cachedServerUrl = normalized;
+        if (normalized !== trimmed) {
+          AsyncStorage.setItem(TARGET_SERVER_KEY, normalized).catch(() => {});
+        }
+      }
+    } else {
+      cachedServerUrl = 'https://speeddrop.onrender.com';
+      AsyncStorage.setItem(TARGET_SERVER_KEY, cachedServerUrl).catch(() => {});
     }
   })
   .catch(() => {});
 
 /**
- * Returns the active normalized backend base URL (e.g. "https://xxx.trycloudflare.com" or "http://10.182.74.170:3000").
+ * Returns the active normalized backend base URL (e.g. "https://speeddrop.onrender.com").
  */
 export function getServerUrl(override?: string | null): string {
   if (override && override.trim()) {
@@ -118,15 +155,23 @@ export function getServerUrl(override?: string | null): string {
 
 /**
  * Get the resolved server URL asynchronously, checking AsyncStorage first,
- * then environment variable, Metro scriptURL, and fallback.
+ * automatically migrating any stale local IPs to the 24/7 cloud URL.
  */
 export async function getServerUrlAsync(): Promise<string> {
   try {
-    const saved = await AsyncStorage.getItem(
-      Config.storageKeys.targetServerIp || '@speeddrop/target_server_ip'
-    );
+    const saved = await AsyncStorage.getItem(TARGET_SERVER_KEY);
     if (saved && saved.trim()) {
-      cachedServerUrl = normalizeServerUrl(saved.trim());
+      const trimmed = saved.trim();
+      if (isLocalPrivateAddress(trimmed)) {
+        cachedServerUrl = 'https://speeddrop.onrender.com';
+        await AsyncStorage.setItem(TARGET_SERVER_KEY, cachedServerUrl);
+        return cachedServerUrl;
+      }
+      const normalized = normalizeServerUrl(trimmed);
+      cachedServerUrl = normalized;
+      if (normalized !== trimmed) {
+        await AsyncStorage.setItem(TARGET_SERVER_KEY, normalized);
+      }
       return cachedServerUrl;
     }
   } catch (e) {
@@ -138,13 +183,7 @@ export async function getServerUrlAsync(): Promise<string> {
     return cachedServerUrl;
   }
 
-  const detected = detectMetroHost();
-  if (detected) {
-    cachedServerUrl = normalizeServerUrl(detected);
-    return cachedServerUrl;
-  }
-
-  cachedServerUrl = normalizeServerUrl(DEFAULT_IP || FALLBACK_IP);
+  cachedServerUrl = 'https://speeddrop.onrender.com';
   return cachedServerUrl;
 }
 
@@ -297,8 +336,12 @@ export async function fetchActiveServerFromDiscovery(
       return null;
     }
 
-    // Determine the best candidate URL: prioritize HTTPS tunnel or activeUrl
-    const candidateUrl = data.tunnelUrl || data.activeUrl || data.serverUrl;
+    // Determine the best candidate URL: prioritize 24/7 cloud URL, activeUrl, serverUrl
+    const candidateUrl =
+      data.activeUrl ||
+      data.serverUrl ||
+      data.tunnelUrl ||
+      (data.localIp ? `http://${data.localIp}:${data.port || DEFAULT_PORTS.BACKEND}` : null);
     if (candidateUrl) {
       const normalized = normalizeServerUrl(candidateUrl);
       await setServerUrl(normalized);
@@ -318,5 +361,78 @@ export async function fetchActiveServerFromDiscovery(
   }
 
   return null;
+}
+
+/**
+ * Directly queries the PC backend's /api/network-info endpoint to obtain
+ * active network interface details.
+ */
+export async function fetchNetworkInfo(host?: string): Promise<{
+  ip: string;
+  port: number;
+  url: string;
+  allIps: { name: string; ip: string; type: string; isHotspot: boolean; url: string }[];
+  isCloud?: boolean;
+} | null> {
+  try {
+    const base = getServerUrl(host);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(`${base}/api/network-info`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * Wakes up the Render / cloud backend by polling /health.
+ * Handles Render free-tier cold starts (~20-40s) with progressive retry status updates.
+ */
+export async function wakeUpServer(
+  serverUrl?: string,
+  onStatusUpdate?: (statusMessage: string) => void,
+  maxAttempts: number = 8
+): Promise<boolean> {
+  const base = getServerUrl(serverUrl);
+  const healthUrl = `${base}/health`;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      if (onStatusUpdate) {
+        if (attempt === 1) {
+          onStatusUpdate('Connecting to cloud server...');
+        } else {
+          onStatusUpdate(`Waking up cloud server (attempt ${attempt}/${maxAttempts})...`);
+        }
+      }
+
+      const controller = new AbortController();
+      const timeoutMs = attempt === 1 ? 5000 : 10000;
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+      const res = await fetch(healthUrl, {
+        headers: TUNNEL_HEADERS,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (res.ok) {
+        return true;
+      }
+    } catch (err: any) {
+      // Continue polling until maxAttempts
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+
+  return false;
 }
 

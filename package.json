@@ -2,7 +2,8 @@
   "name": "speeddrop",
   "version": "1.0.0",
   "scripts": {
-    "discovery": "node discovery-server/server.js",
+    "build": "npm --prefix web-receiver install && npm --prefix web-receiver run build && node scripts/copy-dist.js && npm --prefix mobile-app/backend install && npm --prefix mobile-app/backend run build",
+    "start": "npm --prefix mobile-app/backend start",
     "backend:dev": "npm --prefix mobile-app/backend run dev",
     "mobile:start": "npm --prefix mobile-app run start"
   },

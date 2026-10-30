@@ -33,6 +33,6 @@ export const DEFAULT_PORTS = {
   WEBSOCKET: 3000,
 };
 
-export const DEFAULT_IP = process.env.EXPO_PUBLIC_BACKEND_URL || '10.182.74.170';
+export const DEFAULT_IP = process.env.EXPO_PUBLIC_BACKEND_URL || 'https://speeddrop.onrender.com';
 
-export const DEFAULT_DISCOVERY_URL = process.env.EXPO_PUBLIC_DISCOVERY_URL || 'https://speeddrop-discovery.onrender.com';
+export const DEFAULT_DISCOVERY_URL = process.env.EXPO_PUBLIC_DISCOVERY_URL || 'https://speeddrop.onrender.com';

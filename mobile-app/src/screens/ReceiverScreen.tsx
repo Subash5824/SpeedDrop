@@ -89,11 +89,11 @@ export default function ReceiverScreen() {
       }
 
       // 2. Check query parameters
-      const sidMatch = trimmed.match(/[?&]sid=([^&#]+)/i);
+      const sidMatch = trimmed.match(/[?&](?:sid|sharer)=([^&#]+)/i);
       if (sidMatch) sharerId = sidMatch[1];
 
-      // 3. Check /d/:sharerId path
-      const dMatch = trimmed.match(/\/d\/([^/?&#]+)/i);
+      // 3. Check /d/:sharerId or /receive/:sharerId path
+      const dMatch = trimmed.match(/\/(?:d|receive)\/([^/?&#]+)/i);
       if (dMatch) sharerId = dMatch[1];
 
       const sessMatch = trimmed.match(/[?&]session=([^&#]+)/i);
@@ -110,6 +110,7 @@ export default function ReceiverScreen() {
       if (!targetServer) {
         targetServer = await getServerUrlAsync();
       }
+      targetServer = normalizeServerUrl(targetServer);
 
       if (session) {
         await connectToSharer(targetServer, session);
@@ -267,10 +268,10 @@ export default function ReceiverScreen() {
       const sessMatch = input.match(/[?&]session=([^&#]+)/i);
       if (sessMatch) targetSession = sessMatch[1];
 
-      const sidMatch = input.match(/[?&]sid=([^&#]+)/i);
+      const sidMatch = input.match(/[?&](?:sid|sharer)=([^&#]+)/i);
       if (sidMatch) targetSid = sidMatch[1];
 
-      const dMatch = input.match(/\/d\/([^/?&#]+)/i);
+      const dMatch = input.match(/\/(?:d|receive)\/([^/?&#]+)/i);
       if (dMatch) targetSid = dMatch[1];
 
       // 2. Direct UUID
@@ -288,6 +289,8 @@ export default function ReceiverScreen() {
         }
         targetSid = clean;
       }
+
+      targetServer = normalizeServerUrl(targetServer);
 
       if (targetSession) {
         await connectToSharer(targetServer, targetSession);

@@ -8,4 +8,5 @@ ios/build/
 *.apk
 *.mp4
 *.zip
-backend/
+backend/node_modules/
+backend/uploads/

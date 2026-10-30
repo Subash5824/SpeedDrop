@@ -8,10 +8,11 @@ ios/build/
 *.apk
 *.mp4
 *.zip
-backend/
-web-receiver/
 **/node_modules/
-**/backend/
 **/.expo/
 **/build/
 **/.gradle/
+mobile-app/backend/uploads/
+android_local_backup/
+.env
+
