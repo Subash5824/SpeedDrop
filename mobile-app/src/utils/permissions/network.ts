@@ -8,13 +8,13 @@ export const requestNetworkPermission = async (): Promise<boolean> => {
       if (!state.isConnected) {
         Alert.alert(
           'Network Required',
-          'Please connect to a Wi-Fi network to use SpeedDrop'
+          'Please connect to a Wi-Fi network or enable Hotspot to use SpeedDrop'
         );
         return false;
       }
       return true;
     } catch (error) {
-      console.error('Network permission error:', error);
+      console.warn('Network permission check:', error);
       return false;
     }
   }
@@ -24,14 +24,20 @@ export const requestNetworkPermission = async (): Promise<boolean> => {
 export const getLocalIp = async (): Promise<string> => {
   try {
     const ip = await Network.getIpAddressAsync();
-    return ip;
+    if (ip && ip.trim() && ip !== '0.0.0.0' && ip !== '127.0.0.1') {
+      return ip.trim();
+    }
   } catch (error) {
-    console.error('Failed to get IP:', error);
-    return '127.0.0.1';
+    console.warn('Failed to get IP:', error);
   }
+  return '192.168.43.1';
 };
 
 export const isConnectedToWifi = async (): Promise<boolean> => {
-  const state = await Network.getNetworkStateAsync();
-  return state.isConnected && state.type === 'WIFI';
+  try {
+    const state = await Network.getNetworkStateAsync();
+    return Boolean(state.isConnected && state.type === 'WIFI');
+  } catch (_) {
+    return false;
+  }
 };

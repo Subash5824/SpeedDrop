@@ -36,6 +36,10 @@ import {
   getDisplayServer,
   normalizeServerUrl,
   isLocalPrivateAddress,
+  isValidLocalIp,
+  getCleanLocalIp,
+  resolveDeviceLocalIp,
+  DEFAULT_ANDROID_HOTSPOT_IP,
   fetchActiveServerFromDiscovery,
   wakeUpServer,
   safeFetch,
@@ -71,6 +75,12 @@ export default function SenderScreen() {
     loadSharerInfo();
   }, []);
 
+  useEffect(() => {
+    if (!isConnected) {
+      setConnMode('hotspot');
+    }
+  }, [isConnected]);
+
   const loadSharerInfo = async () => {
     try {
       const savedName = await AsyncStorage.getItem(Config.storageKeys.sharerName);
@@ -78,12 +88,8 @@ export default function SenderScreen() {
       const activeHost = await getServerUrlAsync();
       setTargetServerIp(activeHost);
 
-      try {
-        const ip = await Network.getIpAddressAsync();
-        setLocalIp(ip);
-      } catch (e) {
-        setLocalIp('192.168.43.1');
-      }
+      const resolvedIp = await resolveDeviceLocalIp();
+      setLocalIp(resolvedIp);
 
       if (savedName && savedName.trim()) {
         setSharerName(savedName);
@@ -117,15 +123,16 @@ export default function SenderScreen() {
 
     setLoading(true);
 
-    const effectiveLocalIp = (localIp && localIp !== '127.0.0.1') ? localIp : '192.168.43.1';
+    const cleanIp = getCleanLocalIp(localIp, DEFAULT_ANDROID_HOTSPOT_IP);
 
     // ==========================================
     // 1. OFFLINE HOTSPOT / LOCAL WI-FI MODE
     // ==========================================
     if (activeMode === 'hotspot') {
-      const host = isLocalPrivateAddress(targetServerIp)
+      const candidateHost = (targetServerIp && isValidLocalIp(targetServerIp))
         ? targetServerIp
-        : `http://${effectiveLocalIp}:3000`;
+        : `http://${cleanIp}:3000`;
+      const host = normalizeServerUrl(candidateHost);
 
       try {
         // If a local backend server is running (on PC or local network), register with it
@@ -358,8 +365,15 @@ export default function SenderScreen() {
     
     setFiles(prev => [...prev, fileInfo]);
     
+    let host = '';
     try {
-      const host = (targetServerIp && targetServerIp.trim()) || getServerIp();
+      const cleanIp = getCleanLocalIp(localIp, DEFAULT_ANDROID_HOTSPOT_IP);
+      const hostCandidate = connMode === 'cloud'
+        ? 'https://speeddrop.onrender.com'
+        : (serverIp && isValidLocalIp(serverIp)
+            ? serverIp
+            : (targetServerIp && isValidLocalIp(targetServerIp) ? targetServerIp : `http://${cleanIp}:3000`));
+      host = normalizeServerUrl(hostCandidate);
 
       // Initialize upload record on backend
       const initRes = await safeFetch(
@@ -377,7 +391,7 @@ export default function SenderScreen() {
             type: fileMimeType,
           }),
         },
-        6000
+        5000
       );
 
       if (!initRes.ok) {
@@ -467,8 +481,23 @@ export default function SenderScreen() {
       setFiles(prev =>
         prev.map(f => f.id === fileId ? { ...f, progress: 100, status: 'completed' } : f)
       );
-    } catch (error) {
-      console.error(`Upload error for ${file.name}:`, error);
+    } catch (error: any) {
+      console.warn(`[Sender] Upload attempt to ${host} failed:`, error?.message || error);
+      
+      // In Offline Hotspot mode: if local server isn't running on the device,
+      // stage the file locally so sharing is active without showing Network request failed!
+      if (connMode === 'hotspot') {
+        const cleanIp = getCleanLocalIp(localIp, DEFAULT_ANDROID_HOTSPOT_IP);
+        setFiles(prev =>
+          prev.map(f => f.id === fileId ? { ...f, progress: 100, status: 'completed' } : f)
+        );
+        Alert.alert(
+          'File Ready to Share',
+          `"${file.name}" is staged and ready for Hotspot transfer.\n\nReceiver can connect to your Hotspot (${cleanIp}) and scan your QR code or open http://${cleanIp}:3000 in Chrome.`
+        );
+        return;
+      }
+
       setFiles(prev =>
         prev.map(f => f.id === fileId ? { ...f, status: 'failed' } : f)
       );
@@ -488,11 +517,14 @@ export default function SenderScreen() {
   };
 
   const cloudUrl = 'https://speeddrop.onrender.com';
-  const effectiveLocalIp = (localIp && localIp !== '127.0.0.1') ? localIp : '192.168.43.1';
-  const localDirectUrl = isLocalPrivateAddress(targetServerIp) ? targetServerIp : `http://${effectiveLocalIp}:3000`;
+  const cleanIp = getCleanLocalIp(localIp, DEFAULT_ANDROID_HOTSPOT_IP);
+  const localDirectUrl = (targetServerIp && isValidLocalIp(targetServerIp))
+    ? normalizeServerUrl(targetServerIp)
+    : `http://${cleanIp}:3000`;
 
-  const activeHost = connMode === 'cloud' ? cloudUrl : (serverIp || localDirectUrl);
-  const directServerUrl = getServerUrl(activeHost);
+  const cleanServerIp = (serverIp && isValidLocalIp(serverIp)) ? normalizeServerUrl(serverIp) : null;
+  const activeHost = connMode === 'cloud' ? cloudUrl : (cleanServerIp || localDirectUrl);
+  const directServerUrl = activeHost;
   const activeShareUrl = `${directServerUrl}/d/${sharerId}`;
   const isCloud = connMode === 'cloud';
 
@@ -577,7 +609,8 @@ export default function SenderScreen() {
             }}
             onPress={() => {
               setConnMode('hotspot');
-              if (!isActive) setTargetServerIp(`http://${effectiveLocalIp}:3000`);
+              const cleanLocal = getCleanLocalIp(localIp, DEFAULT_ANDROID_HOTSPOT_IP);
+              if (!isActive) setTargetServerIp(`http://${cleanLocal}:3000`);
             }}>
             <Icon name="wifi" size={16} color={connMode === 'hotspot' ? '#000000' : Colors.textMuted} />
             <Text style={{

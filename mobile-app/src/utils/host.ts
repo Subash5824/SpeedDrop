@@ -1,11 +1,77 @@
 import { NativeModules } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Network from 'expo-network';
 import { Config } from '../constants/config';
 import { DEFAULT_PORTS, DEFAULT_IP } from '../constants/endpoints';
 
 export const DEFAULT_DISCOVERY_URL = 'https://speeddrop.onrender.com';
 
 export const FALLBACK_IP = 'https://speeddrop.onrender.com';
+
+/**
+ * Standard Android WiFi hotspot gateway IP address.
+ * When an Android device acts as a portable Wi-Fi hotspot (Access Point),
+ * Android always assigns 192.168.43.1 as its default AP gateway.
+ */
+export const DEFAULT_ANDROID_HOTSPOT_IP = '192.168.43.1';
+
+/**
+ * Validates whether an IP string is a real, routable local network IPv4 address.
+ * Rejects 0.0.0.0, 127.0.0.1, localhost, empty, or unroutable addresses.
+ */
+export function isValidLocalIp(ip?: string | null): boolean {
+  if (!ip || typeof ip !== 'string') return false;
+  const clean = ip.trim().replace(/^https?:\/\//i, '').replace(/:\d+$/, '');
+  if (!clean) return false;
+  if (
+    clean === '0.0.0.0' ||
+    clean === '127.0.0.1' ||
+    clean === 'localhost' ||
+    clean === '::1' ||
+    clean === '0:0:0:0:0:0:0:0' ||
+    clean === '255.255.255.255'
+  ) {
+    return false;
+  }
+  const parts = clean.split('.');
+  if (parts.length !== 4) return false;
+  const numbers = parts.map((p) => Number(p));
+  if (numbers.some((n) => isNaN(n) || n < 0 || n > 255)) return false;
+  if (numbers[0] === 0 || numbers[0] === 127) return false;
+  return true;
+}
+
+/**
+ * Extracts or sanitizes an IP address candidate.
+ * If candidate is invalid or '0.0.0.0', returns fallback (defaulting to 192.168.43.1).
+ */
+export function getCleanLocalIp(
+  candidate?: string | null,
+  fallback: string = DEFAULT_ANDROID_HOTSPOT_IP
+): string {
+  if (candidate && isValidLocalIp(candidate)) {
+    return candidate.trim().replace(/^https?:\/\//i, '').replace(/:\d+$/, '');
+  }
+  return fallback;
+}
+
+/**
+ * Resolves the device's active local IP address using expo-network.
+ * On Android, when Mobile Hotspot is enabled, Network.getIpAddressAsync() commonly
+ * returns "0.0.0.0" because the wlan0 client is inactive. In that case, this function
+ * cleanly falls back to the reliable Android hotspot gateway (192.168.43.1).
+ */
+export async function resolveDeviceLocalIp(): Promise<string> {
+  try {
+    const ip = await Network.getIpAddressAsync();
+    if (ip && isValidLocalIp(ip)) {
+      return ip.trim();
+    }
+  } catch (err) {
+    console.warn('[host] Network.getIpAddressAsync failed:', err);
+  }
+  return DEFAULT_ANDROID_HOTSPOT_IP;
+}
 
 /**
  * Universal headers required when communicating over public tunnels
@@ -18,7 +84,7 @@ export const TUNNEL_HEADERS: Record<string, string> = {
 };
 
 /**
- * Helper to identify if a saved or entered host is an old private local IP
+ * Helper to identify if a saved or entered host is a private local IP
  * (e.g. 10.x.x.x, 192.168.x.x, 172.16-31.x.x, 127.0.0.1, localhost).
  */
 export function isLocalPrivateAddress(urlOrIp?: string | null): boolean {
@@ -27,6 +93,7 @@ export function isLocalPrivateAddress(urlOrIp?: string | null): boolean {
   return (
     clean === 'localhost' ||
     clean === '127.0.0.1' ||
+    clean === '0.0.0.0' ||
     clean.startsWith('10.') ||
     clean.startsWith('192.168.') ||
     /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(clean)
@@ -43,7 +110,7 @@ export function detectMetroHost(): string | null {
       const match = scriptURL.match(/https?:\/\/([^/:]+)/);
       if (match && match[1]) {
         const host = match[1].trim();
-        if (host !== 'localhost' && host !== '127.0.0.1' && host !== '') {
+        if (host !== 'localhost' && host !== '127.0.0.1' && host !== '0.0.0.0' && host !== '') {
           return host;
         }
       }
@@ -58,10 +125,13 @@ export function detectMetroHost(): string | null {
  * Normalizes any server input (HTTPS cloud URL, IP, hostname, IP:port)
  * into a fully-qualified, reachable base URL without trailing slash.
  *
+ * Guarantees that 0.0.0.0 and loopback are never used for client or sharing links,
+ * automatically substituting DEFAULT_ANDROID_HOTSPOT_IP (192.168.43.1).
+ *
  * Examples:
  * - "https://speeddrop.onrender.com/"    -> "https://speeddrop.onrender.com"
- * - "speeddrop.onrender.com"            -> "https://speeddrop.onrender.com"
- * - "https://speeddrop.onrender.com:3000"-> "https://speeddrop.onrender.com"
+ * - "0.0.0.0:3000"                      -> "http://192.168.43.1:3000"
+ * - "http://0.0.0.0:3000"               -> "http://192.168.43.1:3000"
  * - "http://192.168.1.5:3000"           -> "http://192.168.1.5:3000"
  */
 export function normalizeServerUrl(rawInput?: string | null): string {
@@ -75,6 +145,11 @@ export function normalizeServerUrl(rawInput?: string | null): string {
 
   let inp = rawInput.trim().replace(/\/+$/, '');
 
+  // CRITICAL SANITIZATION: Never allow 0.0.0.0 in URLs!
+  if (inp.includes('0.0.0.0')) {
+    inp = inp.replace(/0\.0\.0\.0/g, DEFAULT_ANDROID_HOTSPOT_IP);
+  }
+
   // 1. Identify if this is a public cloud hostname (Render, Cloudflare, Ngrok, Fly, etc.)
   const tunnelPattern = /\.(trycloudflare\.com|loca\.lt|ngrok(-free)?\.(app|io)|run\.app|fly\.dev|herokuapp\.com|onrender\.com)/i;
   const isTunnelDomain = tunnelPattern.test(inp) || (!/^(\d{1,3}\.){3}\d{1,3}/.test(inp.replace(/^https?:\/\//i, '')) && !inp.includes('localhost'));
@@ -82,16 +157,14 @@ export function normalizeServerUrl(rawInput?: string | null): string {
   if (isTunnelDomain) {
     // Strip protocol first
     let cleanDomain = inp.replace(/^https?:\/\//i, '');
-    // CRITICAL: Strip any custom port (:3000, :8080) from public cloud domains! Tunnels only listen on standard HTTPS (port 443).
+    // Strip any custom port (:3000, :8080) from public cloud domains
     cleanDomain = cleanDomain.replace(/:\d+$/, '');
-    // Always enforce HTTPS for public domains
     return `https://${cleanDomain}`;
   }
 
   // 2. Full protocol already provided for LAN / local IPs
   if (/^https?:\/\//i.test(inp)) {
     const withoutProto = inp.replace(/^https?:\/\//i, '');
-    // If it's an IP or localhost without a port, append DEFAULT_PORTS.BACKEND
     if ((/^(\d{1,3}\.){3}\d{1,3}/.test(withoutProto) || withoutProto.startsWith('localhost')) && !/:\d+$/.test(withoutProto)) {
       return `${inp}:${DEFAULT_PORTS.BACKEND}`;
     }
@@ -123,8 +196,18 @@ const TARGET_SERVER_KEY = Config.storageKeys.targetServerIp || '@speeddrop/targe
 AsyncStorage.getItem(TARGET_SERVER_KEY)
   .then((saved) => {
     if (saved && saved.trim()) {
-      const normalized = normalizeServerUrl(saved.trim());
-      cachedServerUrl = normalized;
+      if (
+        saved.includes('0.0.0.0') ||
+        saved.includes('127.0.0.1') ||
+        saved.includes('10.17.70.170') ||
+        saved.includes('10.181.41.170')
+      ) {
+        AsyncStorage.removeItem(TARGET_SERVER_KEY).catch(() => {});
+        cachedServerUrl = 'https://speeddrop.onrender.com';
+      } else {
+        const normalized = normalizeServerUrl(saved.trim());
+        cachedServerUrl = normalized;
+      }
     } else {
       cachedServerUrl = 'https://speeddrop.onrender.com';
     }
@@ -149,6 +232,16 @@ export async function getServerUrlAsync(): Promise<string> {
   try {
     const saved = await AsyncStorage.getItem(TARGET_SERVER_KEY);
     if (saved && saved.trim()) {
+      if (
+        saved.includes('0.0.0.0') ||
+        saved.includes('127.0.0.1') ||
+        saved.includes('10.17.70.170') ||
+        saved.includes('10.181.41.170')
+      ) {
+        await AsyncStorage.removeItem(TARGET_SERVER_KEY).catch(() => {});
+        cachedServerUrl = 'https://speeddrop.onrender.com';
+        return cachedServerUrl;
+      }
       const normalized = normalizeServerUrl(saved.trim());
       cachedServerUrl = normalized;
       return cachedServerUrl;

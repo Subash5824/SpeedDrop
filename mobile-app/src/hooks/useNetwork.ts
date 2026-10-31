@@ -13,13 +13,13 @@ export const useNetwork = () => {
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo>({
     isConnected: false,
     isWifi: false,
-    ipAddress: '',
+    ipAddress: '192.168.43.1',
     networkType: 'unknown',
   });
 
   useEffect(() => {
-    const unsubscribe = NetInfo.addEventListener(state => {
-      setNetworkInfo(prev => ({
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      setNetworkInfo((prev) => ({
         ...prev,
         isConnected: state.isConnected ?? false,
         isWifi: state.type === 'wifi',
@@ -37,9 +37,13 @@ export const useNetwork = () => {
   const getIpAddress = async () => {
     try {
       const ip = await Network.getIpAddressAsync();
-      setNetworkInfo(prev => ({ ...prev, ipAddress: ip }));
+      const cleanIp = (ip && ip.trim() && ip !== '0.0.0.0' && ip !== '127.0.0.1')
+        ? ip.trim()
+        : '192.168.43.1';
+      setNetworkInfo((prev) => ({ ...prev, ipAddress: cleanIp }));
     } catch (error) {
-      console.error('Failed to get IP:', error);
+      console.warn('Failed to get IP:', error);
+      setNetworkInfo((prev) => ({ ...prev, ipAddress: '192.168.43.1' }));
     }
   };
 
