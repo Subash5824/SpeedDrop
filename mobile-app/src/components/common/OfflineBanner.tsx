@@ -13,8 +13,8 @@ export default function OfflineBanner() {
   }
 
   const message = !isConnected
-    ? 'No internet connection. Operating in offline mode.'
-    : 'Cloud server is waking up or unreachable. Operating in offline mode.';
+    ? '📡 Offline Hotspot mode active. Local zero-data transfers ready.'
+    : '☁️ Cloud server unreachable. Offline Hotspot mode ready.';
 
   return (
     <View style={styles.bannerContainer}>

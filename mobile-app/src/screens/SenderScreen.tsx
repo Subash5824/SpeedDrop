@@ -35,6 +35,7 @@ import {
   getApiUrl,
   getDisplayServer,
   normalizeServerUrl,
+  isLocalPrivateAddress,
   fetchActiveServerFromDiscovery,
   wakeUpServer,
   safeFetch,
@@ -64,6 +65,7 @@ export default function SenderScreen() {
   const [localIp, setLocalIp] = useState('');
   const [targetServerIp, setTargetServerIp] = useState(getServerIp());
   const [showIpEdit, setShowIpEdit] = useState(false);
+  const [connMode, setConnMode] = useState<'cloud' | 'hotspot'>('cloud');
 
   useEffect(() => {
     loadSharerInfo();
@@ -80,7 +82,7 @@ export default function SenderScreen() {
         const ip = await Network.getIpAddressAsync();
         setLocalIp(ip);
       } catch (e) {
-        setLocalIp('127.0.0.1');
+        setLocalIp('192.168.43.1');
       }
 
       if (savedName && savedName.trim()) {
@@ -105,30 +107,85 @@ export default function SenderScreen() {
     }
   };
 
-  const startSharing = async (): Promise<string | null> => {
+  const startSharing = async (modeOverride?: 'cloud' | 'hotspot'): Promise<string | null> => {
+    const activeMode = modeOverride || connMode;
     const effectiveName = sharerName.trim() || 'Mobile User';
     if (!sharerName.trim()) {
       setSharerName('Mobile User');
       await AsyncStorage.setItem(Config.storageKeys.sharerName, 'Mobile User');
     }
 
-    // Fast check: if device has no connection at all
-    if (!isConnected) {
-      Alert.alert(
-        'Offline Mode',
-        'Your device has no active network connection. Please connect to Wi-Fi or Mobile Data to share files via the cloud server, or set up a Mobile Hotspot for direct local sharing.'
-      );
-      return null;
-    }
-
     setLoading(true);
-    let rawHost = (targetServerIp && targetServerIp.trim()) || (await getServerUrlAsync());
-    let host = normalizeServerUrl(rawHost);
-    if (host !== rawHost) {
+
+    const effectiveLocalIp = (localIp && localIp !== '127.0.0.1') ? localIp : '192.168.43.1';
+
+    // ==========================================
+    // 1. OFFLINE HOTSPOT / LOCAL WI-FI MODE
+    // ==========================================
+    if (activeMode === 'hotspot') {
+      const host = isLocalPrivateAddress(targetServerIp)
+        ? targetServerIp
+        : `http://${effectiveLocalIp}:3000`;
+
+      try {
+        // If a local backend server is running (on PC or local network), register with it
+        const response = await safeFetch(
+          getApiUrl('/api/sharer/create', host),
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...TUNNEL_HEADERS,
+            },
+            body: JSON.stringify({ name: effectiveName }),
+          },
+          1500
+        );
+
+        if (response.ok) {
+          const data = await response.json();
+          setSessionId(data.sessionId);
+          setServerIp(data.ip || host);
+          setTargetServerIp(host);
+
+          try {
+            const newSocket = io(getSocketUrl(host), getSocketOptions(host));
+            newSocket.on('connect_error', () => {});
+            newSocket.on('error', () => {});
+            newSocket.emit('register-sharer', {
+              sessionId: data.sessionId,
+              sharerId: data.sharerId,
+              sharerName: effectiveName,
+            });
+            newSocket.on('device-connected', (device: Device) => {
+              setConnectedDevices(prev => [...prev, device]);
+            });
+            newSocket.on('device-disconnected', (deviceId: string) => {
+              setConnectedDevices(prev => prev.filter(d => d.id !== deviceId));
+            });
+            setSocket(newSocket);
+          } catch (_) {}
+
+          setIsActive(true);
+          return data.sessionId;
+        }
+      } catch (_) {
+        // No local server responding; seamlessly activate direct standalone offline session
+      }
+
+      // Standalone direct offline hotspot session (never blocks, zero data!)
+      const directSessionId = uuidv4();
+      setSessionId(directSessionId);
+      setServerIp(host);
       setTargetServerIp(host);
-      persistServerIp(host).catch(() => {});
+      setIsActive(true);
+      return directSessionId;
     }
 
+    // ==========================================
+    // 2. 24/7 CLOUD INTERNET MODE
+    // ==========================================
+    let host = 'https://speeddrop.onrender.com';
     try {
       let response: Response | null = null;
       try {
@@ -145,8 +202,7 @@ export default function SenderScreen() {
           3500
         );
       } catch (directErr) {
-        // First try failed (likely Render free tier waking up from cold sleep)
-        console.log('[Sender] Direct request failed, attempting quick server wake-up...');
+        // Render free tier waking up
         const awake = await wakeUpServer(host, undefined, 2);
         if (awake) {
           try {
@@ -164,46 +220,18 @@ export default function SenderScreen() {
             );
           } catch (_) {}
         }
-
-        // If still no response, check cloud discovery
-        if (!response || !response.ok) {
-          const discovered = await fetchActiveServerFromDiscovery();
-          if (discovered && discovered.activeUrl && discovered.activeUrl !== host) {
-            host = normalizeServerUrl(discovered.activeUrl);
-            setTargetServerIp(host);
-            persistServerIp(host).catch(() => {});
-            try {
-              response = await safeFetch(
-                getApiUrl('/api/sharer/create', host),
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    ...TUNNEL_HEADERS,
-                  },
-                  body: JSON.stringify({ name: effectiveName }),
-                },
-                3500
-              );
-            } catch (_) {}
-          }
-        }
       }
-      
+
       if (!response || !response.ok) {
-        throw new Error(response ? `Server returned status ${response.status}` : 'Could not connect to server');
+        throw new Error('Could not reach cloud server');
       }
 
       const data = await response.json();
       setSessionId(data.sessionId);
-      if (host.startsWith('https://')) {
-        setServerIp(host);
-        setTargetServerIp(host);
-        persistServerIp(host).catch(() => {});
-      } else {
-        setServerIp(data.ip || host);
-      }
-      
+      setServerIp(host);
+      setTargetServerIp(host);
+      persistServerIp(host).catch(() => {});
+
       const newSocket = io(getSocketUrl(host), getSocketOptions(host));
       newSocket.on('connect_error', (err: any) => {
         console.warn('[Sender] Socket connection error:', err?.message || err);
@@ -217,27 +245,33 @@ export default function SenderScreen() {
         sharerId: data.sharerId,
         sharerName: effectiveName,
       });
-      
+
       newSocket.on('device-connected', (device: Device) => {
         setConnectedDevices(prev => [...prev, device]);
       });
-      
+
       newSocket.on('device-disconnected', (deviceId: string) => {
         setConnectedDevices(prev => prev.filter(d => d.id !== deviceId));
       });
-      
+
       setSocket(newSocket);
       setIsActive(true);
       return data.sessionId;
     } catch (error: any) {
-      console.warn('[Sender] startSharing failed safely:', error?.message || error);
-      const isCloudServer = host.startsWith('https://') || host.includes('onrender.com');
-      const displayHost = getDisplayServer(host);
+      console.warn('[Sender] Cloud sharing failed, prompting hotspot fallback:', error?.message || error);
       Alert.alert(
-        'Connection Failed',
-        isCloudServer
-          ? `Could not reach SpeedDrop cloud server at ${displayHost}.\n\nIf the server was sleeping (Render free tier), please wait a moment and tap "Start Sharing" again, or check your internet connection.`
-          : `Could not reach backend at ${displayHost}.\n\nPlease ensure the server is online or reset to https://speeddrop.onrender.com.`
+        'Cloud Server Unreachable',
+        'Could not reach the cloud server (no internet connection).\n\nWould you like to switch to Offline Hotspot mode for zero-data local sharing?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Switch to Hotspot',
+            onPress: () => {
+              setConnMode('hotspot');
+              startSharing('hotspot');
+            },
+          },
+        ]
       );
       return null;
     } finally {
@@ -453,10 +487,14 @@ export default function SenderScreen() {
     }
   };
 
-  const activeHost = serverIp || (targetServerIp && targetServerIp.trim()) || getServerIp();
+  const cloudUrl = 'https://speeddrop.onrender.com';
+  const effectiveLocalIp = (localIp && localIp !== '127.0.0.1') ? localIp : '192.168.43.1';
+  const localDirectUrl = isLocalPrivateAddress(targetServerIp) ? targetServerIp : `http://${effectiveLocalIp}:3000`;
+
+  const activeHost = connMode === 'cloud' ? cloudUrl : (serverIp || localDirectUrl);
   const directServerUrl = getServerUrl(activeHost);
   const activeShareUrl = `${directServerUrl}/d/${sharerId}`;
-  const isCloud = directServerUrl.startsWith('https://') || directServerUrl.includes('onrender.com');
+  const isCloud = connMode === 'cloud';
 
   const getQRData = () => {
     if (!sessionId || !sharerId || !activeHost) return '';
@@ -491,6 +529,67 @@ export default function SenderScreen() {
   return (
     <View style={styles.container}>
       <ScrollView style={styles.content}>
+        {/* Mode Selector: 24/7 Cloud vs Offline Hotspot */}
+        <View style={{
+          flexDirection: 'row',
+          backgroundColor: 'rgba(255, 255, 255, 0.05)',
+          borderRadius: 12,
+          padding: 4,
+          marginBottom: 16,
+          borderWidth: 1,
+          borderColor: Colors.border,
+        }}>
+          <TouchableOpacity
+            style={{
+              flex: 1,
+              paddingVertical: 10,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 8,
+              backgroundColor: connMode === 'cloud' ? Colors.primary : 'transparent',
+              gap: 6,
+            }}
+            onPress={() => {
+              setConnMode('cloud');
+              if (!isActive) setTargetServerIp('https://speeddrop.onrender.com');
+            }}>
+            <Icon name="cloud" size={16} color={connMode === 'cloud' ? '#ffffff' : Colors.textMuted} />
+            <Text style={{
+              fontSize: 12,
+              fontWeight: '700',
+              color: connMode === 'cloud' ? '#ffffff' : Colors.textMuted,
+            }}>
+              🌐 Cloud (Internet)
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={{
+              flex: 1,
+              paddingVertical: 10,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 8,
+              backgroundColor: connMode === 'hotspot' ? Colors.accent : 'transparent',
+              gap: 6,
+            }}
+            onPress={() => {
+              setConnMode('hotspot');
+              if (!isActive) setTargetServerIp(`http://${effectiveLocalIp}:3000`);
+            }}>
+            <Icon name="wifi" size={16} color={connMode === 'hotspot' ? '#000000' : Colors.textMuted} />
+            <Text style={{
+              fontSize: 12,
+              fontWeight: '700',
+              color: connMode === 'hotspot' ? '#000000' : Colors.textMuted,
+            }}>
+              📡 Hotspot (Offline)
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         {/* Sharer Info Card */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Your Sharer ID</Text>
@@ -503,7 +602,7 @@ export default function SenderScreen() {
           </TouchableOpacity>
           <TouchableOpacity onPress={() => setShowIpEdit(true)} style={{ marginTop: 10 }}>
             <Text style={[styles.sharerId, { fontSize: 12, opacity: 0.7 }]}>
-              Server: {getDisplayServer(targetServerIp || getServerIp())} (Tap to change)
+              Server: {getDisplayServer(activeHost)} (Tap to change)
             </Text>
           </TouchableOpacity>
         </View>
@@ -524,7 +623,7 @@ export default function SenderScreen() {
           {!isActive ? (
             <TouchableOpacity 
               style={styles.startButton}
-              onPress={startSharing}
+              onPress={() => startSharing()}
               disabled={loading}>
               {loading ? (
                 <ActivityIndicator color={Colors.text} />
@@ -554,22 +653,22 @@ export default function SenderScreen() {
             <View style={{
               flexDirection: 'row',
               alignItems: 'center',
-              backgroundColor: isCloud ? 'rgba(0, 245, 212, 0.15)' : 'rgba(0, 245, 212, 0.1)',
+              backgroundColor: isCloud ? 'rgba(0, 245, 212, 0.15)' : 'rgba(78, 205, 196, 0.15)',
               borderRadius: 8,
               paddingVertical: 6,
               paddingHorizontal: 12,
               marginBottom: 16,
               alignSelf: 'center',
               borderWidth: 1,
-              borderColor: 'rgba(0, 245, 212, 0.3)',
+              borderColor: isCloud ? 'rgba(0, 245, 212, 0.3)' : 'rgba(78, 205, 196, 0.3)',
             }}>
-              <Icon name={isCloud ? "cloud" : "wifi"} size={16} color={Colors.primary} style={{ marginRight: 6 }} />
+              <Icon name={isCloud ? "cloud" : "wifi"} size={16} color={isCloud ? Colors.primary : Colors.accent} style={{ marginRight: 6 }} />
               <Text style={{
                 fontSize: 12,
                 fontWeight: '700',
-                color: Colors.primary,
+                color: isCloud ? Colors.primary : Colors.accent,
               }}>
-                {isCloud ? '🌐 24/7 Global Cloud Sharing (4G / 5G / Wi-Fi)' : '⚡ Fast Offline Direct Transfer (LAN / Hotspot)'}
+                {isCloud ? '🌐 24/7 Global Cloud Sharing (4G / 5G / Wi-Fi)' : '⚡ Fast Offline Hotspot Transfer (No Internet Required)'}
               </Text>
             </View>
 
@@ -582,7 +681,9 @@ export default function SenderScreen() {
               />
             </View>
             <Text style={[styles.qrHint, { marginTop: 12, textAlign: 'center', fontWeight: '600' }]}>
-              Scan with Camera or open in Chrome browser
+              {isCloud
+                ? 'Scan with Camera or open link in Chrome browser'
+                : 'Connect to this device’s Hotspot or Wi-Fi, then scan or open in Chrome'}
             </Text>
 
             {/* Direct Download Card */}

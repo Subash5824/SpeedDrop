@@ -119,32 +119,20 @@ let cachedServerUrl: string = normalizeServerUrl(
 
 const TARGET_SERVER_KEY = Config.storageKeys.targetServerIp || '@speeddrop/target_server_ip';
 
-// Self-initialize from AsyncStorage in background & clean up any legacy stale local IPs
+// Self-initialize from AsyncStorage in background
 AsyncStorage.getItem(TARGET_SERVER_KEY)
   .then((saved) => {
     if (saved && saved.trim()) {
-      const trimmed = saved.trim();
-      // If user had a stale local private IP saved (like 10.x.x.x:3000), migrate them permanently to cloud
-      if (isLocalPrivateAddress(trimmed)) {
-        cachedServerUrl = 'https://speeddrop.onrender.com';
-        AsyncStorage.setItem(TARGET_SERVER_KEY, cachedServerUrl).catch(() => {});
-        console.log('[host] Migrated stale local IP from AsyncStorage to https://speeddrop.onrender.com');
-      } else {
-        const normalized = normalizeServerUrl(trimmed);
-        cachedServerUrl = normalized;
-        if (normalized !== trimmed) {
-          AsyncStorage.setItem(TARGET_SERVER_KEY, normalized).catch(() => {});
-        }
-      }
+      const normalized = normalizeServerUrl(saved.trim());
+      cachedServerUrl = normalized;
     } else {
       cachedServerUrl = 'https://speeddrop.onrender.com';
-      AsyncStorage.setItem(TARGET_SERVER_KEY, cachedServerUrl).catch(() => {});
     }
   })
   .catch(() => {});
 
 /**
- * Returns the active normalized backend base URL (e.g. "https://speeddrop.onrender.com").
+ * Returns the active normalized backend base URL (e.g. "https://speeddrop.onrender.com" or "http://192.168.43.1:3000").
  */
 export function getServerUrl(override?: string | null): string {
   if (override && override.trim()) {
@@ -154,24 +142,15 @@ export function getServerUrl(override?: string | null): string {
 }
 
 /**
- * Get the resolved server URL asynchronously, checking AsyncStorage first,
- * automatically migrating any stale local IPs to the 24/7 cloud URL.
+ * Get the resolved server URL asynchronously, checking AsyncStorage first.
+ * Supports both 24/7 cloud server and direct offline/hotspot local IPs.
  */
 export async function getServerUrlAsync(): Promise<string> {
   try {
     const saved = await AsyncStorage.getItem(TARGET_SERVER_KEY);
     if (saved && saved.trim()) {
-      const trimmed = saved.trim();
-      if (isLocalPrivateAddress(trimmed)) {
-        cachedServerUrl = 'https://speeddrop.onrender.com';
-        await AsyncStorage.setItem(TARGET_SERVER_KEY, cachedServerUrl);
-        return cachedServerUrl;
-      }
-      const normalized = normalizeServerUrl(trimmed);
+      const normalized = normalizeServerUrl(saved.trim());
       cachedServerUrl = normalized;
-      if (normalized !== trimmed) {
-        await AsyncStorage.setItem(TARGET_SERVER_KEY, normalized);
-      }
       return cachedServerUrl;
     }
   } catch (e) {
