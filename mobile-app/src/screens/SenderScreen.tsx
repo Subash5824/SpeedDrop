@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -19,6 +19,16 @@ import io from 'socket.io-client';
 import * as FileSystem from 'expo-file-system';
 import * as Network from 'expo-network';
 import { v4 as uuidv4 } from 'uuid';
+import {
+  startLocalServer,
+  stopLocalServer,
+  setServerSession,
+  addFileToServer,
+  removeFileFromServer,
+  clearServerSession,
+  isServerRunning,
+  ServerFileEntry,
+} from '@/utils/localHttpServer';
 
 import { Colors } from '@/constants/colors';
 import { Config } from '@/constants/config';
@@ -70,6 +80,47 @@ export default function SenderScreen() {
   const [targetServerIp, setTargetServerIp] = useState(getServerIp());
   const [showIpEdit, setShowIpEdit] = useState(false);
   const [connMode, setConnMode] = useState<'cloud' | 'hotspot'>('cloud');
+  const [localServerReady, setLocalServerReady] = useState(false);
+
+  useEffect(() => {
+    loadSharerInfo();
+  }, []);
+
+  useEffect(() => {
+    if (!isConnected) {
+      setConnMode('hotspot');
+    }
+  }, [isConnected]);
+
+  // Start / stop in-app HTTP server when toggling hotspot mode
+  useEffect(() => {
+    if (connMode === 'hotspot') {
+      const ip = getCleanLocalIp(localIp, DEFAULT_ANDROID_HOTSPOT_IP);
+      if (!isServerRunning()) {
+        startLocalServer(
+          ip,
+          3000,
+          () => {
+            setLocalServerReady(true);
+            console.log('[SenderScreen] In-app HTTP server ready on', ip, ':3000');
+          },
+          (err) => {
+            console.warn('[SenderScreen] In-app server error:', err?.message);
+            // Still mark ready — we can still show QR / link even if server bind fails
+            setLocalServerReady(true);
+          }
+        );
+      } else {
+        setLocalServerReady(true);
+      }
+    } else {
+      // Cloud mode — don't run a local server
+      if (isServerRunning()) {
+        stopLocalServer();
+        setLocalServerReady(false);
+      }
+    }
+  }, [connMode, localIp]);
 
   useEffect(() => {
     loadSharerInfo();
@@ -134,8 +185,8 @@ export default function SenderScreen() {
         : `http://${cleanIp}:3000`;
       const host = normalizeServerUrl(candidateHost);
 
+      // Try to register with an external local PC backend server first (optional)
       try {
-        // If a local backend server is running (on PC or local network), register with it
         const response = await safeFetch(
           getApiUrl('/api/sharer/create', host),
           {
@@ -173,19 +224,75 @@ export default function SenderScreen() {
             setSocket(newSocket);
           } catch (_) {}
 
+          // Register with in-app server too
+          const existingFileEntries: ServerFileEntry[] = files
+            .filter(f => f.uri)
+            .map(f => ({
+              id: f.id,
+              name: f.name,
+              size: f.size,
+              type: f.type,
+              uri: f.uri,
+            }));
+
+          setServerSession({
+            sharerId: data.sharerId || sharerId,
+            sessionId: data.sessionId,
+            sharerName: effectiveName,
+            files: existingFileEntries,
+          });
+
           setIsActive(true);
+          setLoading(false);
           return data.sessionId;
         }
       } catch (_) {
-        // No local server responding; seamlessly activate direct standalone offline session
+        // No external PC server found — use standalone in-app server only
       }
 
-      // Standalone direct offline hotspot session (never blocks, zero data!)
+      // ─── Standalone In-App Server Mode ────────────────────────────────────
+      // The in-app HTTP server (react-native-tcp-socket) IS the backend.
+      // Receivers connect to the hotspot and open http://192.168.43.1:3000 directly.
       const directSessionId = uuidv4();
+      const currentSharerId = sharerId || generateSharerId();
+
       setSessionId(directSessionId);
-      setServerIp(host);
-      setTargetServerIp(host);
+      setServerIp(`http://${cleanIp}:3000`);
+      setTargetServerIp(`http://${cleanIp}:3000`);
+
+      const existingFileEntries: ServerFileEntry[] = files
+        .filter(f => f.uri)
+        .map(f => ({
+          id: f.id,
+          name: f.name,
+          size: f.size,
+          type: f.type,
+          uri: f.uri,
+        }));
+
+      // Register session with the in-app server so it can serve the receiver page & files
+      setServerSession({
+        sharerId: currentSharerId,
+        sessionId: directSessionId,
+        sharerName: effectiveName,
+        files: existingFileEntries,
+      });
+
+      // Ensure in-app server is started
+      if (!isServerRunning()) {
+        await new Promise<void>((resolve) => {
+          startLocalServer(cleanIp, 3000, () => {
+            setLocalServerReady(true);
+            resolve();
+          }, () => {
+            setLocalServerReady(true);
+            resolve();
+          });
+        });
+      }
+
       setIsActive(true);
+      setLoading(false);
       return directSessionId;
     }
 
@@ -290,6 +397,7 @@ export default function SenderScreen() {
     if (socket) {
       socket.disconnect();
     }
+    clearServerSession();
     setIsActive(false);
     setConnectedDevices([]);
     setSessionId('');
@@ -365,15 +473,28 @@ export default function SenderScreen() {
     
     setFiles(prev => [...prev, fileInfo]);
     
+    // ─── HOTSPOT MODE: Register file with in-app HTTP server ──────────────────
+    // In hotspot mode, the in-app TCP server IS the backend. We register the
+    // file URI directly so the server can stream it to receivers over HTTP.
+    // No upload to an external PC server needed.
+    if (connMode === 'hotspot') {
+      addFileToServer({
+        id: fileId,
+        name: file.name,
+        size: fileSize,
+        type: fileMimeType,
+        uri: file.uri,
+      });
+      setFiles(prev =>
+        prev.map(f => f.id === fileId ? { ...f, progress: 100, status: 'completed' } : f)
+      );
+      return;
+    }
+
+    // ─── CLOUD MODE: Upload to remote backend ─────────────────────────────────
     let host = '';
     try {
-      const cleanIp = getCleanLocalIp(localIp, DEFAULT_ANDROID_HOTSPOT_IP);
-      const hostCandidate = connMode === 'cloud'
-        ? 'https://speeddrop.onrender.com'
-        : (serverIp && isValidLocalIp(serverIp)
-            ? serverIp
-            : (targetServerIp && isValidLocalIp(targetServerIp) ? targetServerIp : `http://${cleanIp}:3000`));
-      host = normalizeServerUrl(hostCandidate);
+      host = 'https://speeddrop.onrender.com';
 
       // Initialize upload record on backend
       const initRes = await safeFetch(
@@ -482,28 +603,13 @@ export default function SenderScreen() {
         prev.map(f => f.id === fileId ? { ...f, progress: 100, status: 'completed' } : f)
       );
     } catch (error: any) {
-      console.warn(`[Sender] Upload attempt to ${host} failed:`, error?.message || error);
-      
-      // In Offline Hotspot mode: if local server isn't running on the device,
-      // stage the file locally so sharing is active without showing Network request failed!
-      if (connMode === 'hotspot') {
-        const cleanIp = getCleanLocalIp(localIp, DEFAULT_ANDROID_HOTSPOT_IP);
-        setFiles(prev =>
-          prev.map(f => f.id === fileId ? { ...f, progress: 100, status: 'completed' } : f)
-        );
-        Alert.alert(
-          'File Ready to Share',
-          `"${file.name}" is staged and ready for Hotspot transfer.\n\nReceiver can connect to your Hotspot (${cleanIp}) and scan your QR code or open http://${cleanIp}:3000 in Chrome.`
-        );
-        return;
-      }
-
+      console.warn(`[Sender] Cloud upload to ${host} failed:`, error?.message || error);
       setFiles(prev =>
         prev.map(f => f.id === fileId ? { ...f, status: 'failed' } : f)
       );
       Alert.alert(
         'Upload Failed',
-        `Failed to upload ${file.name}. ${error instanceof Error ? error.message : ''}`
+        `Failed to upload ${file.name}. ${error instanceof Error ? error.message : 'Network error'}`
       );
     }
   };
@@ -556,6 +662,9 @@ export default function SenderScreen() {
 
   const removeFile = (fileId: string) => {
     setFiles(prev => prev.filter(f => f.id !== fileId));
+    if (connMode === 'hotspot') {
+      removeFileFromServer(fileId);
+    }
   };
 
   return (
