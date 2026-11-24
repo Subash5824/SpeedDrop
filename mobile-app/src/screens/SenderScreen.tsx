@@ -122,16 +122,6 @@ export default function SenderScreen() {
     }
   }, [connMode, localIp]);
 
-  useEffect(() => {
-    loadSharerInfo();
-  }, []);
-
-  useEffect(() => {
-    if (!isConnected) {
-      setConnMode('hotspot');
-    }
-  }, [isConnected]);
-
   const loadSharerInfo = async () => {
     try {
       const savedName = await AsyncStorage.getItem(Config.storageKeys.sharerName);

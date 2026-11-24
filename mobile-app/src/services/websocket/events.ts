@@ -31,7 +31,7 @@ export const WebSocketEvents = {
   ERROR_FILE_NOT_FOUND: 'error-file-not-found',
   ERROR_SESSION_EXPIRED: 'error-session-expired',
   ERROR_PERMISSION_DENIED: 'error-permission-denied',
-};
+} as const;
 
 export type WebSocketEventMap = {
   [WebSocketEvents.CONNECT]: void;
