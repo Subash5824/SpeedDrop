@@ -222,6 +222,11 @@ export const FileReceiver: React.FC<FileReceiverProps> = ({ onBack }) => {
 
       let res = await fetch(getApiUrl(`/api/sharer/discover?sid=${encodeURIComponent(cleanSid)}`));
       if (!res.ok) {
+        // Also try without SD- prefix
+        const rawSid = cleanSid.replace(/^SD-?/, '');
+        res = await fetch(getApiUrl(`/api/sharer/discover?sid=${encodeURIComponent(rawSid)}`));
+      }
+      if (!res.ok) {
         // Fallback to active sharer on the local network/hotspot
         res = await fetch(getApiUrl('/api/sharer/active'));
       }

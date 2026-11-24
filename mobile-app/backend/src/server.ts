@@ -46,6 +46,8 @@ interface FileInfo {
 
 interface SharerCreateBody {
   name?: string;
+  sharerId?: string;
+  sessionId?: string;
 }
 
 interface SharerUpdateBody {
@@ -347,10 +349,41 @@ app.post<{
   Body: SharerCreateBody;
 }>('/api/sharer/create', async (request: FastifyRequest<{ Body: SharerCreateBody }>, reply: FastifyReply) => {
   try {
-    const sharerId = generateSharerId();
-    const sessionId = uuidv4();
-    const sharerName = request.body.name || `Device-${Math.floor(Math.random() * 1000)}`;
-    
+    const rawSharerId = request.body?.sharerId ? request.body.sharerId.trim().toUpperCase() : '';
+    let sharerId = rawSharerId;
+    if (!sharerId) {
+      sharerId = generateSharerId();
+    } else if (!sharerId.startsWith('SD-')) {
+      sharerId = `SD-${sharerId}`;
+    }
+
+    const sessionId = (request.body?.sessionId && request.body.sessionId.trim())
+      ? request.body.sessionId.trim()
+      : uuidv4();
+    const sharerName = request.body?.name || `Device-${Math.floor(Math.random() * 1000)}`;
+
+    const serverBaseUrl = getPublicServerUrl(request);
+    const primaryUrl = `${serverBaseUrl}/d/${sharerId}`;
+
+    // If an existing session for this sharerId or sessionId exists, refresh and return it
+    for (const [existingSessionId, existingSharer] of sharers.entries()) {
+      if (existingSharer.sharerId === sharerId || existingSessionId === sessionId) {
+        existingSharer.name = sharerName;
+        existingSharer.createdAt = new Date();
+        app.log.info(`Sharer session refreshed: ${sharerName} (${sharerId})`);
+        reply.send({
+          sharerId,
+          sharerName,
+          sessionId: existingSessionId,
+          port: PORT,
+          ip: serverBaseUrl.replace(/^https?:\/\//i, '').replace(/:\d+$/, ''),
+          url: primaryUrl,
+          serverUrl: serverBaseUrl,
+        });
+        return;
+      }
+    }
+
     const sharer: Sharer = {
       id: sharerId,
       name: sharerName,
@@ -365,9 +398,7 @@ app.post<{
     
     app.log.info(`New sharer created: ${sharerName} (${sharerId})`);
 
-    const serverBaseUrl = getPublicServerUrl(request);
     const primaryIp = getPrimaryLocalIp();
-    const primaryUrl = `${serverBaseUrl}/d/${sharerId}`;
 
     // Announce new sharer to cloud discovery server (only in local dev mode)
     if (!process.env.RENDER && process.env.NODE_ENV !== 'production' && process.env.DISABLE_DISCOVERY !== 'true') {

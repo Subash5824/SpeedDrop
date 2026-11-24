@@ -278,6 +278,21 @@ export default function SenderScreen() {
         files: existingFileEntries,
       });
 
+      // Also register with cloud in background if internet is reachable so receiver can find it both ways!
+      safeFetch(
+        getApiUrl('/api/sharer/create', 'https://speeddrop.onrender.com'),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...TUNNEL_HEADERS },
+          body: JSON.stringify({
+            name: effectiveName,
+            sharerId: currentSharerId,
+            sessionId: directSessionId,
+          }),
+        },
+        3000
+      ).catch(() => {});
+
       // Ensure in-app server is started
       if (!isServerRunning()) {
         await new Promise<void>((resolve) => {
@@ -302,6 +317,12 @@ export default function SenderScreen() {
     let host = 'https://speeddrop.onrender.com';
     try {
       let response: Response | null = null;
+      const requestPayload = {
+        name: effectiveName,
+        sharerId: sharerId || undefined,
+        sessionId: sessionId || undefined,
+      };
+
       try {
         response = await safeFetch(
           getApiUrl('/api/sharer/create', host),
@@ -311,9 +332,9 @@ export default function SenderScreen() {
               'Content-Type': 'application/json',
               ...TUNNEL_HEADERS,
             },
-            body: JSON.stringify({ name: effectiveName }),
+            body: JSON.stringify(requestPayload),
           },
-          3500
+          4000
         );
       } catch (directErr) {
         // Render free tier waking up
@@ -328,9 +349,9 @@ export default function SenderScreen() {
                   'Content-Type': 'application/json',
                   ...TUNNEL_HEADERS,
                 },
-                body: JSON.stringify({ name: effectiveName }),
+                body: JSON.stringify(requestPayload),
               },
-              3500
+              4000
             );
           } catch (_) {}
         }
@@ -342,6 +363,10 @@ export default function SenderScreen() {
 
       const data = await response.json();
       setSessionId(data.sessionId);
+      if (data.sharerId) {
+        setSharerId(data.sharerId);
+        await AsyncStorage.setItem(Config.storageKeys.sharerId, data.sharerId);
+      }
       setServerIp(host);
       setTargetServerIp(host);
       persistServerIp(host).catch(() => {});
@@ -497,7 +522,7 @@ export default function SenderScreen() {
       host = 'https://speeddrop.onrender.com';
 
       // Initialize upload record on backend
-      const initRes = await safeFetch(
+      let initRes = await safeFetch(
         getApiUrl(`/api/upload/${currentSession}/init`, host),
         {
           method: 'POST',
@@ -514,6 +539,30 @@ export default function SenderScreen() {
         },
         5000
       );
+
+      // If session was lost (e.g. Render server restarted), re-register the session and retry init
+      if (initRes.status === 404) {
+        console.log('[Sender] Session not found on backend, re-registering session...');
+        const newSid = await startSharing('cloud');
+        const activeSid = newSid || currentSession;
+        initRes = await safeFetch(
+          getApiUrl(`/api/upload/${activeSid}/init`, host),
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...TUNNEL_HEADERS,
+            },
+            body: JSON.stringify({
+              fileId,
+              name: file.name,
+              size: fileSize,
+              type: fileMimeType,
+            }),
+          },
+          5000
+        );
+      }
 
       if (!initRes.ok) {
         throw new Error(`Init failed with status ${initRes.status}`);
