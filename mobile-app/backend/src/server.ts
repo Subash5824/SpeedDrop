@@ -118,7 +118,9 @@ app.get('/web', async (request: FastifyRequest, reply: FastifyReply) => {
 // Custom setNotFoundHandler for complete SPA fallback
 app.setNotFoundHandler((req: FastifyRequest, reply: FastifyReply) => {
   const url = req.raw.url || '';
-  if (url.startsWith('/api') || url.startsWith('/d/')) {
+  
+  // 🛠️ FIX 1: Added '/socket.io' to prevent Fastify from sending index.html to Socket.IO requests
+  if (url.startsWith('/api') || url.startsWith('/d/') || url.startsWith('/socket.io')) {
     return reply.code(404).send({
       error: 'Not Found',
       message: `Route ${req.method}:${req.url} not found`
@@ -659,7 +661,21 @@ app.post<{
       if (isSingleUpload || (!isAppendMode && expectedTotalChunks <= 1)) {
         // Direct stream to file.path with pipeline (0 memory buffer)
         const writeStream = createWriteStream(file.path);
-        await pipeline(data.file, writeStream);
+        
+        // 🛠️ FIX 2: Added try/catch for stream errors
+        try {
+          await pipeline(data.file, writeStream);
+        } catch (streamError) {
+          app.log.error({ err: streamError }, 'Stream error during direct upload');
+          if (!data.file.destroyed) data.file.destroy();
+          if (!writeStream.destroyed) writeStream.destroy();
+          await fs.remove(file.path).catch(() => {});
+          
+          if (!reply.sent) {
+            return reply.status(500).send({ error: 'Upload stream interrupted' });
+          }
+          return;
+        }
 
         const stat = await fs.stat(file.path);
         file.uploaded = true;
@@ -682,7 +698,21 @@ app.post<{
         const writeStream = createWriteStream(file.path, {
           flags: chunkIndex === 0 ? 'w' : 'a',
         });
-        await pipeline(data.file, writeStream);
+        
+        // 🛠️ FIX 2: Added try/catch for stream errors
+        try {
+          await pipeline(data.file, writeStream);
+        } catch (streamError) {
+          app.log.error({ err: streamError }, 'Stream error during append upload');
+          if (!data.file.destroyed) data.file.destroy();
+          if (!writeStream.destroyed) writeStream.destroy();
+          
+          if (!reply.sent) {
+            return reply.status(500).send({ error: 'Upload stream interrupted' });
+          }
+          return;
+        }
+
         file.chunks = Math.max(file.chunks, chunkIndex + 1);
 
         const isLastChunk = chunkIndex === expectedTotalChunks - 1 || file.chunks >= expectedTotalChunks;
@@ -712,7 +742,22 @@ app.post<{
       // Chunked multipart part file (.partN)
       const chunkPath = `${file.path}.part${chunkIndex}`;
       const chunkWriteStream = createWriteStream(chunkPath);
-      await pipeline(data.file, chunkWriteStream);
+      
+      // 🛠️ FIX 2: Added try/catch for stream errors
+      try {
+        await pipeline(data.file, chunkWriteStream);
+      } catch (streamError) {
+        app.log.error({ err: streamError }, 'Stream error during chunk upload');
+        if (!data.file.destroyed) data.file.destroy();
+        if (!chunkWriteStream.destroyed) chunkWriteStream.destroy();
+        await fs.remove(chunkPath).catch(() => {});
+        
+        if (!reply.sent) {
+          return reply.status(500).send({ error: 'Upload chunk interrupted' });
+        }
+        return;
+      }
+
       file.chunks++;
 
       if (file.chunks >= expectedTotalChunks) {
