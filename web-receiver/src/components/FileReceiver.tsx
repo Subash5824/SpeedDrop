@@ -44,8 +44,12 @@ export const FileReceiver: React.FC<FileReceiverProps> = ({ onBack }) => {
   const socketRef = useRef<Socket | null>(null);
   const shouldAutoDownload = useRef<boolean>(false);
   const autoDownloadedIds = useRef<Set<string>>(new Set());
+  const hasInitialized = useRef<boolean>(false); // 🛠️ FIX: Prevent React StrictMode double-mount
 
   useEffect(() => {
+    if (hasInitialized.current) return;
+    hasInitialized.current = true;
+
     const params = new URLSearchParams(window.location.search);
     const session = params.get('session');
     const sid = params.get('sid');
@@ -70,6 +74,7 @@ export const FileReceiver: React.FC<FileReceiverProps> = ({ onBack }) => {
     return () => {
       if (socketRef.current) {
         socketRef.current.disconnect();
+        socketRef.current = null;
       }
     };
   }, []);
@@ -120,7 +125,10 @@ export const FileReceiver: React.FC<FileReceiverProps> = ({ onBack }) => {
       }
 
       const newSocket = io(getBackendUrl(), {
-        transports: ['websocket', 'polling'],
+        // 🛠️ FIX: Polling first, then upgrade to WebSocket
+        transports: ['polling', 'websocket'], 
+        reconnectionAttempts: 5,
+        timeout: 10000,
       });
       socketRef.current = newSocket;
 
@@ -136,6 +144,11 @@ export const FileReceiver: React.FC<FileReceiverProps> = ({ onBack }) => {
         registerReceiver();
       }
       newSocket.on('connect', registerReceiver);
+      
+      // Log connection errors for easier debugging
+      newSocket.on('connect_error', (err) => {
+        console.warn('[Socket Receiver] Connection error:', err.message);
+      });
 
       newSocket.on('file-available', (file: FileInfo) => {
         setSharer(prev => {
