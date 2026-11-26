@@ -241,8 +241,6 @@ export default function SenderScreen() {
       }
 
       // ─── Standalone In-App Server Mode ────────────────────────────────────
-      // The in-app HTTP server (react-native-tcp-socket) IS the backend.
-      // Receivers connect to the hotspot and open http://192.168.43.1:3000 directly.
       const directSessionId = uuidv4();
       const currentSharerId = sharerId || generateSharerId();
 
@@ -260,7 +258,6 @@ export default function SenderScreen() {
           uri: f.uri,
         }));
 
-      // Register session with the in-app server so it can serve the receiver page & files
       setServerSession({
         sharerId: currentSharerId,
         sessionId: directSessionId,
@@ -268,7 +265,6 @@ export default function SenderScreen() {
         files: existingFileEntries,
       });
 
-      // Also register with cloud in background if internet is reachable so receiver can find it both ways!
       safeFetch(
         getApiUrl('/api/sharer/create', 'https://speeddrop.onrender.com'),
         {
@@ -283,7 +279,6 @@ export default function SenderScreen() {
         3000
       ).catch(() => {});
 
-      // Ensure in-app server is started
       if (!isServerRunning()) {
         await new Promise<void>((resolve) => {
           startLocalServer(cleanIp, 3000, () => {
@@ -327,7 +322,6 @@ export default function SenderScreen() {
           4000
         );
       } catch (directErr) {
-        // Render free tier waking up
         const awake = await wakeUpServer(host, undefined, 2);
         if (awake) {
           try {
@@ -489,10 +483,10 @@ export default function SenderScreen() {
     setFiles(prev => [...prev, fileInfo]);
     
     // ─── HOTSPOT MODE: Register file with in-app HTTP server ──────────────────
-    // In hotspot mode, the in-app TCP server IS the backend. We register the
-    // file URI directly so the server can stream it to receivers over HTTP.
-    // No upload to an external PC server needed.
-    if (connMode === 'hotspot') {
+    // Only use the in-app server if the user hasn't overridden the IP with a PC backend.
+    const isUsingExternalPc = targetServerIp && !targetServerIp.includes(DEFAULT_ANDROID_HOTSPOT_IP);
+
+    if (connMode === 'hotspot' && !isUsingExternalPc) {
       addFileToServer({
         id: fileId,
         name: file.name,
@@ -506,10 +500,11 @@ export default function SenderScreen() {
       return;
     }
 
-    // ─── CLOUD MODE: Upload to remote backend ─────────────────────────────────
+    // ─── CLOUD OR EXTERNAL PC: Upload to backend ──────────────────────────────
     let host = '';
     try {
-      host = 'https://speeddrop.onrender.com';
+      // FIX: Use the active host (Render or the PC IP) instead of hardcoding Render
+      host = targetServerIp || 'https://speeddrop.onrender.com';
 
       // Initialize upload record on backend
       let initRes = await safeFetch(
@@ -562,8 +557,6 @@ export default function SenderScreen() {
         prev.map(f => f.id === fileId ? { ...f, progress: 5, status: 'transferring' } : f)
       );
 
-      // Files <= 50MB use single native multipart upload.
-      // Files > 50MB (up to 10GB) use 5MB sequential chunk slices directly from disk to keep RAM bounded.
       const CHUNK_THRESHOLD = 50 * 1024 * 1024; // 50MB
       const CHUNK_SIZE = 5 * 1024 * 1024;       // 5MB per chunk
 
@@ -593,14 +586,12 @@ export default function SenderScreen() {
           const end = Math.min(start + CHUNK_SIZE, fileSize);
           const chunkLength = end - start;
 
-          // Read only 5MB slice from disk into base64 - bounded memory footprint
           const chunkBase64 = await FileSystem.readAsStringAsync(file.uri, {
             encoding: FileSystem.EncodingType.Base64,
             position: start,
             length: chunkLength,
           });
 
-          // Upload chunk with retry logic
           let chunkSent = false;
           let retryCount = 0;
           while (!chunkSent && retryCount < 3) {
@@ -630,7 +621,6 @@ export default function SenderScreen() {
             }
           }
 
-          // Update progress smoothly
           const currentProgress = Math.min(99, Math.round(((i + 1) / totalChunks) * 100));
           setFiles(prev =>
             prev.map(f => f.id === fileId ? { ...f, progress: currentProgress, status: 'transferring' } : f)
@@ -642,7 +632,7 @@ export default function SenderScreen() {
         prev.map(f => f.id === fileId ? { ...f, progress: 100, status: 'completed' } : f)
       );
     } catch (error: any) {
-      console.warn(`[Sender] Cloud upload to ${host} failed:`, error?.message || error);
+      console.warn(`[Sender] Upload to ${host} failed:`, error?.message || error);
       setFiles(prev =>
         prev.map(f => f.id === fileId ? { ...f, status: 'failed' } : f)
       );

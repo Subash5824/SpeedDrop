@@ -55,6 +55,9 @@ export const FileSender: React.FC<FileSenderProps> = ({ onBack }) => {
   const activeShareUrl = `${directServerUrl}/d/${sharerId}`;
 
   const initializeSharer = useCallback(async () => {
+    // 🛠️ FIX 1: Prevent React Strict Mode from creating duplicate sockets
+    if (socketRef.current || sessionId) return;
+
     setLoading(true);
     setError(null);
     try {
@@ -77,31 +80,41 @@ export const FileSender: React.FC<FileSenderProps> = ({ onBack }) => {
         setServerBaseUrl(data.url.split('/d/')[0]);
       }
 
-      const newSocket = io(getBackendUrl(), {
-        transports: ['websocket', 'polling'],
-      });
-
-      const register = () => {
-        newSocket.emit('register-sharer', {
-          sessionId: data.sessionId,
-          sharerId: data.sharerId,
-          sharerName: sharerName,
+      if (!socketRef.current) {
+        const newSocket = io(getBackendUrl(), {
+          // 🛠️ FIX 2: Use 'polling' first. Render prefers HTTP polling before upgrading to WebSocket.
+          transports: ['polling', 'websocket'],
+          reconnectionAttempts: 5,
+          timeout: 10000,
         });
-      };
 
-      if (newSocket.connected) {
-        register();
+        const register = () => {
+          newSocket.emit('register-sharer', {
+            sessionId: data.sessionId,
+            sharerId: data.sharerId,
+            sharerName: sharerName,
+          });
+        };
+
+        if (newSocket.connected) {
+          register();
+        }
+        newSocket.on('connect', register);
+
+        // Log connection errors for easier debugging
+        newSocket.on('connect_error', (err) => {
+          console.warn('[Socket] Connection error:', err.message);
+        });
+
+        socketRef.current = newSocket;
       }
-      newSocket.on('connect', register);
-
-      socketRef.current = newSocket;
     } catch (err) {
       console.error('Failed to initialize sharer:', err);
       setError('Could not connect to SpeedDrop backend. Ensure backend is running.');
     } finally {
       setLoading(false);
     }
-  }, [sharerName]);
+  }, [sharerName, sessionId]);
 
   useEffect(() => {
     initializeSharer();
@@ -110,15 +123,18 @@ export const FileSender: React.FC<FileSenderProps> = ({ onBack }) => {
     fetch(getApiUrl('/api/network-info'))
       .then(r => r.ok ? r.json() : null)
       .then(data => {
-        if (data?.ip) {
-          setServerIp(data.ip);
+        // 🛠️ FIX 3: Changed setServerIp to setServerBaseUrl and use data.url
+        if (data?.url) {
+          setServerBaseUrl(data.url);
         }
       })
       .catch(() => {});
 
     return () => {
+      // 🛠️ FIX 4: Clear the ref on unmount
       if (socketRef.current) {
         socketRef.current.disconnect();
+        socketRef.current = null;
       }
     };
   }, [initializeSharer]);
